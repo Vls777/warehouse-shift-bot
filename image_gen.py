@@ -9,6 +9,8 @@ def _font(size, bold=False):
         else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf" if bold
         else "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf" if bold
+        else "/usr/share/fonts/TTF/DejaVuSans.ttf",
         "/System/Library/Fonts/Supplemental/Arial Bold.ttf" if bold
         else "/System/Library/Fonts/Supplemental/Arial.ttf",
     ]
@@ -22,7 +24,7 @@ def _font(size, bold=False):
 
 def render_day(date_obj: date_cls, rows, extra_notes: str = "") -> bytes:
     W = 900
-    H = 1100
+    H = 1000
     bg = (255, 255, 255)
     fg = (30, 30, 30)
     accent = (60, 110, 200)
@@ -33,10 +35,8 @@ def render_day(date_obj: date_cls, rows, extra_notes: str = "") -> bytes:
     d = ImageDraw.Draw(img)
 
     d.rectangle([0, 0, W, 130], fill=accent)
-    title = "Расписание смен"
-    subtitle = date_obj.strftime("%d.%m.%Y (%a)")
-    d.text((40, 25), title, font=_font(40, True), fill=(255, 255, 255))
-    d.text((40, 80), subtitle, font=_font(28), fill=(230, 230, 255))
+    d.text((40, 25), "Расписание смен", font=_font(40, True), fill=(255, 255, 255))
+    d.text((40, 80), date_obj.strftime("%d.%m.%Y (%a)"), font=_font(28), fill=(230, 230, 255))
 
     y = 170
     d.text((40, y), "ДНЕВНАЯ СМЕНА  09:00–18:00", font=_font(26, True), fill=fg)
@@ -47,7 +47,7 @@ def render_day(date_obj: date_cls, rows, extra_notes: str = "") -> bytes:
     for r in day_rows:
         by_sec.setdefault(r["section"], []).append(r["name"])
 
-    for sec in ["сборка", "приёмка", "отгрузка"]:
+    for sec in ["приёмка", "сборка", "погрузка"]:
         names = by_sec.get(sec, [])
         d.text((40, y), sec.upper(), font=_font(22, True), fill=accent)
         y += 36
@@ -70,9 +70,8 @@ def render_day(date_obj: date_cls, rows, extra_notes: str = "") -> bytes:
     d.rectangle([30, y, W - 30, y + 160], fill=night_bg)
     d.text((50, y + 20), "ВТОРАЯ СМЕНА  14:00–23:00", font=_font(26, True), fill=night_fg)
     if night_rows:
-        r = night_rows[0]
-        d.text((50, y + 70), f"{r['name']}", font=_font(32, True), fill=night_fg)
-        d.text((50, y + 115), f"участок: {r['section']}", font=_font(22), fill=(200, 200, 230))
+        d.text((50, y + 70), night_rows[0]["name"], font=_font(32, True), fill=night_fg)
+        d.text((50, y + 115), "смена 14:00–23:00", font=_font(22), fill=(200, 200, 230))
     else:
         d.text((50, y + 70), "Вторая смена не работает", font=_font(24), fill=(255, 180, 180))
 
@@ -115,21 +114,21 @@ def render_week(start_date: date_cls, days_data: list, title_suffix: str = "") -
             by_sec.setdefault(r["section"], []).append(r["name"])
 
         x = 50
-        for i, sec in enumerate(["сборка", "приёмка", "отгрузка"]):
+        for sec in ["приёмка", "сборка", "погрузка"]:
             names = ", ".join(by_sec.get(sec, [])) or "—"
             d.text((x, y + 65), sec.upper(), font=_font(18, True), fill=(60, 110, 200))
             yy = y + 92
             text = names
             while text:
-                chunk = text[:24]
-                text = text[24:]
+                chunk = text[:20]
+                text = text[20:]
                 d.text((x, yy), chunk, font=_font(18), fill=(30, 30, 30))
                 yy += 24
             x += 310
 
         d.rectangle([50, y + 175, W - 50, y + 210], fill=(40, 40, 70))
         if night_rows:
-            d.text((60, y + 180), f"🌙 {night_rows[0]['name']} — {night_rows[0]['section']}",
+            d.text((60, y + 180), f"🌙 Вторая смена: {night_rows[0]['name']}",
                    font=_font(18, True), fill=(255, 255, 255))
         else:
             d.text((60, y + 180), "🌙 вторая смена не работает",
