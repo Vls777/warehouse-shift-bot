@@ -109,6 +109,34 @@ def ctx():
     }
 
 
+def show_edit_menu(peer_id, date_iso: str):
+    """Показать меню правок + текущее расписание дня."""
+    d = date_cls.fromisoformat(date_iso)
+    rows = storage.get_schedule_full(date_iso)
+    lines = [f"✏️ Правка расписания на {d.strftime('%d.%m.%Y')}", ""]
+    day = [r for r in rows if r["shift"] == "day"]
+    night = [r for r in rows if r["shift"] == "second"]
+
+    lines.append("☀️ Дневная:")
+    if day:
+        for r in day:
+            lines.append(f"  • {r['name']} — {r['section']}")
+    else:
+        lines.append("  — никого")
+
+    lines.append("")
+    lines.append("🌙 Вторая смена:")
+    if night:
+        for r in night:
+            lines.append(f"  • {r['name']}")
+    else:
+        lines.append("  — никого")
+
+    lines.append("")
+    lines.append("Что сделать?")
+    send(peer_id, "\n".join(lines), keyboards.edit_menu())
+
+
 def action_today(peer_id):
     d = date_cls.today()
     if not scheduler.is_working_day(d):
@@ -223,7 +251,7 @@ def action_journal_today(peer_id):
     night = [s for s in shifts if s["shift"] == "second"]
     if night:
         for s in night:
-            lines.append(f"  • {s['name']} — {s['section']}")
+            lines.append(f"  • {s['name']}")
     else:
         lines.append("  — никого")
     lines.append("")
@@ -264,6 +292,8 @@ def handle_state(peer_id, user_id, text):
     state = st["state"]
     data = st.get("data", {})
 
+    # ============ ОСНОВНЫЕ СОСТОЯНИЯ ============
+
     if state == "wait_add_name":
         name = text.strip()
         if storage.add_worker(name):
@@ -289,7 +319,8 @@ def handle_state(peer_id, user_id, text):
             lines.append("Работал:")
             for s in shifts:
                 tag = "🌙" if s["shift"] == "second" else "☀️"
-                lines.append(f"  • {s['date']} {tag} {s['section']}")
+                sec = "" if s["shift"] == "second" else f" {s['section']}"
+                lines.append(f"  • {s['date']} {tag}{sec}")
         else:
             lines.append("Работал: —")
         lines.append("")
@@ -484,14 +515,23 @@ def handle_state(peer_id, user_id, text):
         day = [s for s in shifts if s["shift"] == "day"]
         night = [s for s in shifts if s["shift"] == "second"]
         lines.append("☀️ Дневная:")
-        lines += [f"  • {s['name']} — {s['section']}" for s in day] or ["  — никого"]
+        if day:
+            for s in day:
+                lines.append(f"  • {s['name']} — {s['section']}")
+        else:
+            lines.append("  — никого")
         lines.append("")
         lines.append("🌙 Вторая смена:")
-        lines += [f"  • {s['name']} — {s['section']}" for s in night] or ["  — никого"]
+        if night:
+            for s in night:
+                lines.append(f"  • {s['name']}")
+        else:
+            lines.append("  — никого")
         lines.append("")
         if absences:
             lines.append("🚫 Отсутствовали:")
-            lines += [f"  • {a['name']} — {a['reason'] or '—'}" for a in absences]
+            for a in absences:
+                lines.append(f"  • {a['name']} — {a['reason'] or '—'}")
         else:
             lines.append("🚫 Отсутствовали: никого")
         send_long(peer_id, "\n".join(lines), keyboards.journal_menu())
@@ -623,6 +663,142 @@ def handle_state(peer_id, user_id, text):
             send(peer_id, "Отменено", keyboards.worker_menu())
         reset_state(peer_id); return True
 
+    # ============ РУЧНАЯ ПРАВКА РАСПИСАНИЯ ============
+
+    if state == "edit_pick_date":
+        if text.strip().lower() in ("сегодня", "today"):
+            d = date_cls.today()
+        else:
+            d = parse_date(text)
+        if not d:
+            return send(peer_id, "❌ Формат: ДД.ММ.ГГГГ или «сегодня»", keyboards.cancel_menu())
+        if not scheduler.is_working_day(d):
+            return send(peer_id, "⚠️ Этот день — выходной", keyboards.cancel_menu())
+        data["edit_date"] = d.isoformat()
+        st["data"] = data
+        st["state"] = "edit_menu"
+        show_edit_menu(peer_id, d.isoformat())
+        return True
+
+    if state == "edit_menu":
+        date_iso = data.get("edit_date", "")
+        t = text.strip()
+
+        if t == "🔀 Переставить":
+            st["state"] = "edit_move_name"
+            return send(peer_id, "Кого переставить? Введите имя:", keyboards.cancel_menu())
+
+        if t == "↔️ Поменять местами":
+            st["state"] = "edit_swap_first"
+            return send(peer_id, "Первый работник (кого меняем):", keyboards.cancel_menu())
+
+        if t == "➖ Убрать из смены":
+            st["state"] = "edit_remove_name"
+            return send(peer_id, "Кого убрать из смены?", keyboards.cancel_menu())
+
+        if t == "➕ Добавить в смену":
+            st["state"] = "edit_add_name"
+            return send(peer_id, "Кого добавить? Введите имя:", keyboards.cancel_menu())
+
+        if t == "🌙 Сменить 2-го сменщика":
+            st["state"] = "edit_second_name"
+            return send(peer_id, "Кто будет 2-м сменщиком на этот день?", keyboards.cancel_menu())
+
+        if t == "👁 Показать расписание":
+            show_edit_menu(peer_id, date_iso)
+            return True
+
+        if t == "⬅️ Назад":
+            reset_state(peer_id)
+            return send(peer_id, "Главное меню", keyboards.main_menu(get_role(user_id)))
+
+        return send(peer_id, "Выберите действие кнопкой", keyboards.edit_menu())
+
+    if state == "edit_move_name":
+        data["move_name"] = text.strip()
+        st["data"] = data
+        st["state"] = "edit_move_section"
+        return send(peer_id, f"На какой участок поставить {data['move_name']}?",
+                    keyboards.sections_menu())
+
+    if state == "edit_move_section":
+        sec = text.strip().lower()
+        if sec not in ("приёмка", "сборка", "погрузка"):
+            return send(peer_id, "❌ приёмка / сборка / погрузка", keyboards.sections_menu())
+        date_iso = data.get("edit_date", "")
+        name = data.get("move_name", "")
+        if storage.move_worker_in_schedule(date_iso, name, sec):
+            send(peer_id, f"✅ {name} → {sec}")
+        else:
+            send(peer_id, f"⚠️ {name} не найден в расписании")
+        st["state"] = "edit_menu"
+        show_edit_menu(peer_id, date_iso)
+        return True
+
+    if state == "edit_swap_first":
+        data["swap_a"] = text.strip()
+        st["data"] = data
+        st["state"] = "edit_swap_second"
+        return send(peer_id, f"С кем поменять {data['swap_a']}?", keyboards.cancel_menu())
+
+    if state == "edit_swap_second":
+        data["swap_b"] = text.strip()
+        st["data"] = data
+        date_iso = data.get("edit_date", "")
+        ok, msg = storage.swap_workers_in_schedule(
+            date_iso, data.get("swap_a", ""), data.get("swap_b", "")
+        )
+        if ok:
+            send(peer_id, f"✅ Поменяли: {data['swap_a']} ↔ {data['swap_b']}")
+        else:
+            send(peer_id, f"⚠️ {msg}")
+        st["state"] = "edit_menu"
+        show_edit_menu(peer_id, date_iso)
+        return True
+
+    if state == "edit_remove_name":
+        name = text.strip()
+        date_iso = data.get("edit_date", "")
+        if storage.remove_worker_from_schedule(date_iso, name):
+            send(peer_id, f"➖ {name} убран из смены")
+        else:
+            send(peer_id, f"⚠️ {name} не найден в расписании")
+        st["state"] = "edit_menu"
+        show_edit_menu(peer_id, date_iso)
+        return True
+
+    if state == "edit_add_name":
+        data["add_name"] = text.strip()
+        st["data"] = data
+        st["state"] = "edit_add_section"
+        return send(peer_id, f"На какой участок поставить {data['add_name']}?",
+                    keyboards.sections_menu())
+
+    if state == "edit_add_section":
+        sec = text.strip().lower()
+        if sec not in ("приёмка", "сборка", "погрузка"):
+            return send(peer_id, "❌ приёмка / сборка / погрузка", keyboards.sections_menu())
+        date_iso = data.get("edit_date", "")
+        name = data.get("add_name", "")
+        if storage.add_worker_to_schedule(date_iso, name, sec, "day"):
+            send(peer_id, f"✅ {name} → {sec}")
+        else:
+            send(peer_id, f"⚠️ {name} не найден")
+        st["state"] = "edit_menu"
+        show_edit_menu(peer_id, date_iso)
+        return True
+
+    if state == "edit_second_name":
+        name = text.strip()
+        date_iso = data.get("edit_date", "")
+        if storage.set_day_second_shift(date_iso, name):
+            send(peer_id, f"✅ {name} — 2-я смена на этот день")
+        else:
+            send(peer_id, f"⚠️ {name} не найден")
+        st["state"] = "edit_menu"
+        show_edit_menu(peer_id, date_iso)
+        return True
+
     return False
 
 
@@ -712,14 +888,21 @@ def handle_button(peer_id, user_id, text):
     if t == "📆 Отметить отсутствие":
         user_states[peer_id] = {"state": "wait_absence_name", "data": {}}
         send(peer_id, "Имя работника:", keyboards.cancel_menu()); return True
+    if t == "✏️ Править расписание":
+        if role != "admin":
+            send(peer_id, "⛔ Только для админа"); return True
+        user_states[peer_id] = {"state": "edit_pick_date", "data": {}}
+        send(peer_id, "На какую дату править? (ДД.ММ.ГГГГ)\nИли напишите «сегодня»:",
+             keyboards.cancel_menu())
+        return True
+    if t == "🔧 Пересобрать":
+        action_replan(peer_id); return True
     if t == "🌙 Назначить 2-ю":
         user_states[peer_id] = {"state": "wait_second_set_name", "data": {}}
         send(peer_id, "Имя работника:", keyboards.cancel_menu()); return True
     if t == "♻️ Сбросить 2-ю":
         user_states[peer_id] = {"state": "wait_second_reset_date", "data": {}}
         send(peer_id, "Дата недели:", keyboards.cancel_menu()); return True
-    if t == "🔧 Пересобрать":
-        action_replan(peer_id); return True
     if t == "🗑 Удалить расписание":
         user_states[peer_id] = {"state": "wait_clear_date", "data": {}}
         send(peer_id, "Дата:", keyboards.cancel_menu()); return True
@@ -762,7 +945,8 @@ def handle_button(peer_id, user_id, text):
             if my:
                 sec, sh = my[0]["section"], my[0]["shift"]
                 tag = "🌙" if sh == "second" else "☀️"
-                lines.append(f"  {d.strftime('%a %d.%m')}: {tag} {sec}")
+                sec_str = "2-я смена" if sh == "second" else sec
+                lines.append(f"  {d.strftime('%a %d.%m')}: {tag} {sec_str}")
             else:
                 lines.append(f"  {d.strftime('%a %d.%m')}: выходной")
         send(peer_id, "\n".join(lines), keyboards.worker_menu())
