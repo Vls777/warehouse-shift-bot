@@ -70,15 +70,16 @@ def more_menu() -> str:
     kb.add_button("📅 На дату", color=VkKeyboardColor.PRIMARY)
     kb.add_button("📆 Отметить отсутствие", color=VkKeyboardColor.NEGATIVE)
     kb.add_line()
+    kb.add_button("✏️ Править расписание", color=VkKeyboardColor.PRIMARY)
+    kb.add_button("🔧 Пересобрать", color=VkKeyboardColor.SECONDARY)
+    kb.add_line()
     kb.add_button("🌙 Назначить 2-ю", color=VkKeyboardColor.SECONDARY)
     kb.add_button("♻️ Сбросить 2-ю", color=VkKeyboardColor.SECONDARY)
     kb.add_line()
-    kb.add_button("🔧 Пересобрать", color=VkKeyboardColor.SECONDARY)
     kb.add_button("🗑 Удалить расписание", color=VkKeyboardColor.NEGATIVE)
-    kb.add_line()
     kb.add_button("🔔 Рассылки", color=VkKeyboardColor.SECONDARY)
-    kb.add_button("💾 Бэкап сейчас", color=VkKeyboardColor.SECONDARY)
     kb.add_line()
+    kb.add_button("💾 Бэкап сейчас", color=VkKeyboardColor.SECONDARY)
     kb.add_button("⬅️ Назад", color=VkKeyboardColor.SECONDARY)
     return kb.get_keyboard()
 
@@ -102,6 +103,31 @@ def worker_menu() -> str:
     kb.add_button("✅ Я вернулся", color=VkKeyboardColor.POSITIVE)
     kb.add_line()
     kb.add_button("ℹ️ Профиль", color=VkKeyboardColor.SECONDARY)
+    return kb.get_keyboard()
+
+
+def edit_menu() -> str:
+    kb = VkKeyboard(one_time=False)
+    kb.add_button("🔀 Переставить", color=VkKeyboardColor.PRIMARY)
+    kb.add_button("↔️ Поменять местами", color=VkKeyboardColor.PRIMARY)
+    kb.add_line()
+    kb.add_button("➖ Убрать из смены", color=VkKeyboardColor.NEGATIVE)
+    kb.add_button("➕ Добавить в смену", color=VkKeyboardColor.POSITIVE)
+    kb.add_line()
+    kb.add_button("🌙 Сменить 2-го сменщика", color=VkKeyboardColor.SECONDARY)
+    kb.add_line()
+    kb.add_button("👁 Показать расписание", color=VkKeyboardColor.SECONDARY)
+    kb.add_button("⬅️ Назад", color=VkKeyboardColor.SECONDARY)
+    return kb.get_keyboard()
+
+
+def sections_menu() -> str:
+    kb = VkKeyboard(one_time=True)
+    kb.add_button("приёмка")
+    kb.add_button("сборка")
+    kb.add_button("погрузка")
+    kb.add_line()
+    kb.add_button("❌ Отмена", color=VkKeyboardColor.NEGATIVE)
     return kb.get_keyboard()
 
 
