@@ -21,22 +21,21 @@ def fmt_schedule(rows, date_obj: date_cls, day_type: str = "", week_worker=None)
 
     lines = [header, ""]
     lines.append("☀️ Дневная смена (09:00–18:00)")
-    if day:
-        by_sec = {}
-        for r in day:
-            by_sec.setdefault(r["section"], []).append(r["name"])
-        for sec in scheduler.SECTIONS:
-            names = by_sec.get(sec, [])
-            if names:
-                lines.append(f"  • {sec.capitalize()}: {', '.join(names)}")
-    else:
+    by_sec = {}
+    for r in day:
+        by_sec.setdefault(r["section"], []).append(r["name"])
+    for sec in ["приёмка", "сборка", "погрузка"]:
+        names = by_sec.get(sec, [])
+        if names:
+            lines.append(f"  • {sec.capitalize()}: {', '.join(names)}")
+    if not day:
         lines.append("  — никого")
 
     lines.append("")
     lines.append("🌙 Вторая смена (14:00–23:00)")
     if night:
         for r in night:
-            lines.append(f"  • {r['name']} — {r['section']}")
+            lines.append(f"  • {r['name']}")
     else:
         if week_worker:
             lines.append(f"  🚫 {week_worker['name']} отсутствует — вторая смена не работает")
@@ -82,7 +81,8 @@ def compare_schedules(old_rows, new_rows) -> str:
 HELP_TEXT = (
     "🏭 Бот расписания смен склада\n\n"
     "Управление через кнопки. Рабочие дни: Пн–Сб (Сб — выходной по умолчанию).\n"
-    "Вторая смена: один человек на всю неделю.\n"
+    "Участки: приёмка (1), сборка (2), погрузка (остальные).\n"
+    "Вторая смена: 1 человек на всю неделю, без участка.\n"
     "Если 2-й сменщик заболел — в этот день смена не работает.\n\n"
     "Автоматика:\n"
     "• 07:30 ежедневно — рассылка расписания на сегодня\n"
