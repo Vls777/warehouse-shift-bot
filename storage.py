@@ -167,6 +167,16 @@ def get_schedule(date_str: str):
         ).fetchall()
 
 
+def get_schedule_full(date_str: str):
+    with get_db() as conn:
+        return conn.execute(
+            """SELECT s.worker_id as id, w.name, s.section, s.shift
+               FROM schedule s JOIN workers w ON w.id = s.worker_id
+               WHERE s.date=? ORDER BY s.shift, s.section, w.name""",
+            (date_str,),
+        ).fetchall()
+
+
 def save_schedule(date_str: str, assignments: list):
     with get_db() as conn:
         conn.execute("DELETE FROM schedule WHERE date=?", (date_str,))
@@ -405,3 +415,101 @@ def export_rows(start: str, end: str):
                ORDER BY s.date, s.shift, w.name""",
             (start, end),
         ).fetchall()
+
+
+# ---------- РУЧНАЯ ПРАВКА РАСПИСАНИЯ ----------
+
+def move_worker_in_schedule(date_str: str, name: str, new_section: str) -> bool:
+    """Переставить человека на другой участок в конкретный день."""
+    w = get_worker_by_name(name)
+    if not w:
+        return False
+    with get_db() as conn:
+        cur = conn.execute(
+            "UPDATE schedule SET section=? WHERE date=? AND worker_id=?",
+            (new_section, date_str, w["id"]),
+        )
+        return cur.rowcount > 0
+
+
+def remove_worker_from_schedule(date_str: str, name: str) -> bool:
+    """Убрать человека из расписания на день."""
+    w = get_worker_by_name(name)
+    if not w:
+        return False
+    with get_db() as conn:
+        cur = conn.execute(
+            "DELETE FROM schedule WHERE date=? AND worker_id=?",
+            (date_str, w["id"]),
+        )
+        return cur.rowcount > 0
+
+
+def add_worker_to_schedule(date_str: str, name: str, section: str, shift: str) -> bool:
+    """Добавить человека в расписание на день."""
+    w = get_worker_by_name(name)
+    if not w:
+        return False
+    with get_db() as conn:
+        try:
+            conn.execute(
+                "INSERT INTO schedule (date, worker_id, section, shift) VALUES (?,?,?,?)",
+                (date_str, w["id"], section, shift),
+            )
+        except sqlite3.IntegrityError:
+            conn.execute(
+                "UPDATE schedule SET section=?, shift=? WHERE date=? AND worker_id=?",
+                (section, shift, date_str, w["id"]),
+            )
+        return True
+
+
+def swap_workers_in_schedule(date_str: str, name_a: str, name_b: str):
+    """Поменять двух работников местами (участок+смена)."""
+    a = get_worker_by_name(name_a)
+    b = get_worker_by_name(name_b)
+    if not a or not b:
+        return False, "Один из работников не найден"
+    with get_db() as conn:
+        ra = conn.execute(
+            "SELECT section, shift FROM schedule WHERE date=? AND worker_id=?",
+            (date_str, a["id"]),
+        ).fetchone()
+        rb = conn.execute(
+            "SELECT section, shift FROM schedule WHERE date=? AND worker_id=?",
+            (date_str, b["id"]),
+        ).fetchone()
+        if not ra or not rb:
+            return False, "Кто-то не в расписании на этот день"
+        conn.execute(
+            "UPDATE schedule SET section=?, shift=? WHERE date=? AND worker_id=?",
+            (rb["section"], rb["shift"], date_str, a["id"]),
+        )
+        conn.execute(
+            "UPDATE schedule SET section=?, shift=? WHERE date=? AND worker_id=?",
+            (ra["section"], ra["shift"], date_str, b["id"]),
+        )
+    return True, "OK"
+
+
+def set_day_second_shift(date_str: str, name: str) -> bool:
+    """Назначить 2-го сменщика на конкретный день (только на день)."""
+    w = get_worker_by_name(name)
+    if not w:
+        return False
+    with get_db() as conn:
+        conn.execute(
+            "DELETE FROM schedule WHERE date=? AND shift='second'",
+            (date_str,),
+        )
+        try:
+            conn.execute(
+                "INSERT INTO schedule (date, worker_id, section, shift) VALUES (?,?,?,?)",
+                (date_str, w["id"], "—", "second"),
+            )
+        except sqlite3.IntegrityError:
+            conn.execute(
+                "UPDATE schedule SET section='—', shift='second' WHERE date=? AND worker_id=?",
+                (date_str, w["id"]),
+            )
+    return True
