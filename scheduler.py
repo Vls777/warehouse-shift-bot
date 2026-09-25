@@ -1,7 +1,9 @@
 from datetime import date as date_cls, timedelta
 import storage
 
-SECTIONS = ["сборка", "приёмка", "отгрузка"]
+SECTIONS = ["приёмка", "сборка", "погрузка"]
+ASSEMBLY_SIZE = 2
+RECEIVING_SIZE = 1
 SUNDAY = 6
 SATURDAY = 5
 
@@ -78,20 +80,38 @@ def generate_for_date(date_str: str):
     second_id, _ = get_second_shift_worker(date_str)
     day_workers = [w for w in available if w["id"] != second_id]
 
-    offset = d.toordinal()
+    day_workers.sort(key=lambda w: w["name"])
+    if day_workers:
+        shift = d.toordinal() % len(day_workers)
+        day_workers = day_workers[shift:] + day_workers[:shift]
+
     assignments = []
 
     if second_id is not None:
-        second_section = SECTIONS[(len(day_workers) + offset) % 3]
         assignments.append(
-            {"worker_id": second_id, "section": second_section, "shift": "second"}
+            {"worker_id": second_id, "section": "—", "shift": "second"}
         )
 
-    for i, w in enumerate(day_workers):
-        section = SECTIONS[(i + offset) % 3]
+    n = len(day_workers)
+    n_receiving = min(RECEIVING_SIZE, n) if n >= 1 else 0
+    n_assembly = min(ASSEMBLY_SIZE, max(0, n - n_receiving))
+
+    idx = 0
+    for _ in range(n_receiving):
         assignments.append(
-            {"worker_id": w["id"], "section": section, "shift": "day"}
+            {"worker_id": day_workers[idx]["id"], "section": "приёмка", "shift": "day"}
         )
+        idx += 1
+    for _ in range(n_assembly):
+        assignments.append(
+            {"worker_id": day_workers[idx]["id"], "section": "сборка", "shift": "day"}
+        )
+        idx += 1
+    while idx < n:
+        assignments.append(
+            {"worker_id": day_workers[idx]["id"], "section": "погрузка", "shift": "day"}
+        )
+        idx += 1
 
     storage.save_schedule(date_str, assignments)
     return assignments, None
