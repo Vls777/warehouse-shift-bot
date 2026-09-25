@@ -1,0 +1,4 @@
+vk_api==11.9.9
+requests==2.32.3
+APScheduler==3.10.4
+Pillow==10.4.0
