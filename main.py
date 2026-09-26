@@ -3,6 +3,7 @@
 # ============================================================
 import csv
 import io
+import json
 import logging
 import os
 import random
@@ -570,21 +571,22 @@ def generate_for_date(date_str):
         shift = d.toordinal() % len(free)
         free = free[shift:] + free[:shift]
 
-    receiving = pinned.get("приёмка", [])[:RECEIVING_SIZE]
+    # ЗАКРЕПЛЁННЫЕ — все попадают, без обрезки
+    receiving = list(pinned.get("приёмка", []))
     if len(receiving) < RECEIVING_SIZE:
         need = RECEIVING_SIZE - len(receiving)
         receiving += free[:need]
         free = free[need:]
 
     asm_want = get_assembly_size(date_str, ASSEMBLY_SIZE)
-    assembly = pinned.get("сборка", [])[:asm_want]
+    assembly = list(pinned.get("сборка", []))
     if len(assembly) < asm_want:
         need = asm_want - len(assembly)
         assembly += free[:need]
         free = free[need:]
 
-    warehouse4 = pinned.get("склад №4", [])
-    loading = pinned.get("погрузка", []) + free
+    warehouse4 = list(pinned.get("склад №4", []))
+    loading = list(pinned.get("погрузка", [])) + free
 
     assignments = []
     if second_id is not None:
@@ -823,12 +825,12 @@ def pins_menu():
 
 
 def pin_sections_menu():
-    kb = VkKeyboard(one_time=True)
-    kb.add_button("приёмка")
-    kb.add_button("сборка")
+    kb = VkKeyboard(one_time=False)
+    kb.add_button("приёмка", color=VkKeyboardColor.PRIMARY)
+    kb.add_button("сборка", color=VkKeyboardColor.PRIMARY)
     kb.add_line()
-    kb.add_button("склад №4")
-    kb.add_button("погрузка")
+    kb.add_button("склад №4", color=VkKeyboardColor.PRIMARY)
+    kb.add_button("погрузка", color=VkKeyboardColor.PRIMARY)
     kb.add_line()
     kb.add_button("❌ Отмена", color=VkKeyboardColor.NEGATIVE)
     return kb.get_keyboard()
@@ -850,12 +852,12 @@ def edit_menu():
 
 
 def sections_menu():
-    kb = VkKeyboard(one_time=True)
-    kb.add_button("приёмка")
-    kb.add_button("сборка")
+    kb = VkKeyboard(one_time=False)
+    kb.add_button("приёмка", color=VkKeyboardColor.PRIMARY)
+    kb.add_button("сборка", color=VkKeyboardColor.PRIMARY)
     kb.add_line()
-    kb.add_button("склад №4")
-    kb.add_button("погрузка")
+    kb.add_button("склад №4", color=VkKeyboardColor.PRIMARY)
+    kb.add_button("погрузка", color=VkKeyboardColor.PRIMARY)
     kb.add_line()
     kb.add_button("❌ Отмена", color=VkKeyboardColor.NEGATIVE)
     return kb.get_keyboard()
@@ -884,16 +886,27 @@ def worker_menu():
 
 
 def cancel_menu():
-    kb = VkKeyboard(one_time=True)
+    kb = VkKeyboard(one_time=False)
     kb.add_button("❌ Отмена", color=VkKeyboardColor.NEGATIVE)
     return kb.get_keyboard()
 
 
 def confirm_inline(action, extra=""):
     kb = VkKeyboard(inline=True)
-    payload_yes = f'{{"cmd":"confirm","action":"{action}","extra":"{extra}"}}'
+    payload_yes = json.dumps({"cmd": "confirm", "action": action, "extra": extra})
     kb.add_callback_button(label="✅ Да", color=VkKeyboardColor.POSITIVE, payload=payload_yes)
     kb.add_callback_button(label="❌ Отмена", color=VkKeyboardColor.NEGATIVE, payload='{"cmd":"cancel_inline"}')
+    return kb.get_keyboard()
+
+
+def workers_inline(prefix, workers, cols=2):
+    kb = VkKeyboard(inline=True)
+    n = len(workers)
+    for i, w in enumerate(workers):
+        payload = json.dumps({"cmd": "pick_w", "p": prefix, "n": w["name"]})
+        kb.add_callback_button(label=w["name"], color=VkKeyboardColor.SECONDARY, payload=payload)
+        if (i + 1) % cols == 0 and i != n - 1:
+            kb.add_line()
     return kb.get_keyboard()
 
 
@@ -918,7 +931,7 @@ def send_long(peer_id, text, keyboard=None):
         send(peer_id, chunk, keyboard if is_last else None)
 
 
-def send_photo(peer_id, png_bytes, caption=""):
+def send_photo(peer_id, png_bytes, caption="", keyboard=None):
     try:
         logging.info(f"send_photo: {len(png_bytes)} bytes")
         upload_url = vk.photos.getMessagesUploadServer(peer_id=peer_id)["upload_url"]
@@ -929,9 +942,15 @@ def send_photo(peer_id, png_bytes, caption=""):
             return
         saved = vk.photos.saveMessagesPhoto(photo=resp["photo"], server=resp["server"], hash=resp["hash"])
         p = saved[0]
-        vk.messages.send(peer_id=peer_id, message=caption,
-                         attachment=f"photo{p['owner_id']}_{p['id']}",
-                         random_id=random.randint(1, 2**31 - 1))
+        kwargs = {
+            "peer_id": peer_id,
+            "message": caption,
+            "attachment": f"photo{p['owner_id']}_{p['id']}",
+            "random_id": random.randint(1, 2**31 - 1),
+        }
+        if keyboard:
+            kwargs["keyboard"] = keyboard
+        vk.messages.send(**kwargs)
         logging.info("send_photo: OK")
     except Exception as e:
         logging.warning(f"send_photo error: {e}")
@@ -972,7 +991,7 @@ def reset_state(peer_id):
 
 
 # ============================================================
-# IMAGE GEN — со скачиванием шрифта DejaVu (рабочие URL)
+# IMAGE GEN
 # ============================================================
 _FONT_CACHE = {}
 _FONT_PATHS = {}
@@ -1217,13 +1236,14 @@ def action_today(peer_id):
         rows = get_schedule(d.isoformat())
     ws = week_start(d).isoformat()
     ww = get_week_assignment_worker(ws)
-    send_long(peer_id, fmt_schedule(rows, d, day_type_for(d), ww), main_menu())
+    kb = main_menu()
+    send_long(peer_id, fmt_schedule(rows, d, day_type_for(d), ww), kb)
     try:
         if not _has_font():
             logging.warning("Нет шрифта — картинка пропущена")
             return
         png = render_day(d, rows)
-        send_photo(peer_id, png, "")
+        send_photo(peer_id, png, "", keyboard=kb)
     except Exception as e:
         logging.warning(f"image: {e}")
 
@@ -1387,42 +1407,6 @@ def handle_state(peer_id, user_id, text):
             send(peer_id, f"⚠️ {name} уже в списке", workers_menu())
         reset_state(peer_id); return True
 
-    if state == "wait_remove_name":
-        name = text.strip()
-        reset_state(peer_id)
-        send(peer_id, f"Удалить {name}?", confirm_inline("remove_worker", name))
-        return True
-
-    if state == "wait_history_name":
-        name = text.strip()
-        shifts, absences = history_worker(name, 30)
-        if shifts is None:
-            send(peer_id, f"⚠️ {name} не найден", workers_menu())
-            reset_state(peer_id); return True
-        lines = [f"📖 История: {name} (30 дней)", ""]
-        if shifts:
-            lines.append("Работал:")
-            for s in shifts:
-                tag = "🌙" if s["shift"] == "second" else "☀️"
-                sec = "" if s["shift"] == "second" else f" {s['section']}"
-                lines.append(f"  • {s['date']} {tag}{sec}")
-        else:
-            lines.append("Работал: —")
-        lines.append("")
-        if absences:
-            lines.append("Отсутствовал:")
-            for a in absences:
-                lines.append(f"  • {a['date']} — {a['reason'] or '—'}")
-        else:
-            lines.append("Отсутствовал: —")
-        send_long(peer_id, "\n".join(lines), workers_menu())
-        reset_state(peer_id); return True
-
-    if state == "wait_bind_name":
-        data["name"] = text.strip()
-        st["data"] = data; st["state"] = "wait_bind_vk"
-        return send(peer_id, f"Введите VK ID для {data['name']}:", cancel_menu())
-
     if state == "wait_bind_vk":
         try:
             vk_id = int(text.strip())
@@ -1435,15 +1419,8 @@ def handle_state(peer_id, user_id, text):
             send(peer_id, f"⚠️ {name} не найден", workers_menu())
         reset_state(peer_id); return True
 
-    if state == "wait_unbind_name":
-        name = text.strip()
-        if unbind_vk(name):
-            send(peer_id, f"🔓 {name} отвязан", workers_menu())
-        else:
-            send(peer_id, f"⚠️ {name} не найден", workers_menu())
-        reset_state(peer_id); return True
-
     if state == "wait_sick_name":
+        # fallback — если ввели текстом
         name = text.strip()
         today = date_cls.today()
         if not is_working_day(today):
@@ -1453,10 +1430,7 @@ def handle_state(peer_id, user_id, text):
         if not add_absence(name, today.isoformat(), "заболел"):
             send(peer_id, f"⚠️ {name} не найден", main_menu(get_role(user_id)))
             reset_state(peer_id); return True
-        _, err = generate_for_date(today.isoformat())
-        if err:
-            send(peer_id, f"⚠️ {err}", main_menu(get_role(user_id)))
-            reset_state(peer_id); return True
+        generate_for_date(today.isoformat())
         new_rows = get_schedule(today.isoformat())
         diff = compare_schedules(old_rows, new_rows)
         send(peer_id, f"🚫 {name} — заболел\n🔄 Изменения:\n{diff}", main_menu(get_role(user_id)))
@@ -1468,14 +1442,8 @@ def handle_state(peer_id, user_id, text):
         if not remove_absence(name, today.isoformat()):
             send(peer_id, f"⚠️ {name} не отмечен", main_menu(get_role(user_id)))
             reset_state(peer_id); return True
-        old_rows = get_schedule(today.isoformat())
-        _, err = generate_for_date(today.isoformat())
-        if err:
-            send(peer_id, f"⚠️ {err}", main_menu(get_role(user_id)))
-            reset_state(peer_id); return True
-        new_rows = get_schedule(today.isoformat())
-        diff = compare_schedules(old_rows, new_rows)
-        send(peer_id, f"✅ {name} вернулся\n🔄 Изменения:\n{diff}", main_menu(get_role(user_id)))
+        generate_for_date(today.isoformat())
+        send(peer_id, f"✅ {name} вернулся", main_menu(get_role(user_id)))
         reset_state(peer_id); return True
 
     if state in ("wait_workday_date", "wait_dayoff_date"):
@@ -1554,10 +1522,6 @@ def handle_state(peer_id, user_id, text):
         else:
             send(peer_id, "⚠️ Не найден", more_menu())
         reset_state(peer_id); return True
-
-    if state == "wait_second_set_name":
-        data["name"] = text.strip(); st["data"] = data; st["state"] = "wait_second_set_date"
-        return send(peer_id, "Дата из недели:", cancel_menu())
 
     if state == "wait_second_set_date":
         d = parse_date(text)
@@ -1726,15 +1690,6 @@ def handle_state(peer_id, user_id, text):
             send(peer_id, "Отменено", worker_menu())
         reset_state(peer_id); return True
 
-    if state == "pin_name":
-        name = text.strip()
-        w = get_worker_by_name(name)
-        if not w:
-            send(peer_id, f"⚠️ {name} не найден", pins_menu())
-            reset_state(peer_id); return True
-        data["pin_name"] = name; st["data"] = data; st["state"] = "pin_section"
-        return send(peer_id, f"На какой участок закрепить {name}?", pin_sections_menu())
-
     if state == "pin_section":
         sec = text.strip().lower()
         if sec not in ("приёмка", "сборка", "погрузка", "склад №4"):
@@ -1745,19 +1700,10 @@ def handle_state(peer_id, user_id, text):
             send(peer_id, f"⚠️ Не найден", pins_menu())
             reset_state(peer_id); return True
         set_pin(w["id"], sec)
-        send(peer_id, f"📌 {name} закреплён за «{sec}»", pins_menu())
-        reset_state(peer_id); return True
-
-    if state == "unpin_name":
-        name = text.strip()
-        w = get_worker_by_name(name)
-        if not w:
-            send(peer_id, f"⚠️ Не найден", pins_menu())
-            reset_state(peer_id); return True
-        if remove_pin(w["id"]):
-            send(peer_id, f"🔓 {name} откреплён", pins_menu())
-        else:
-            send(peer_id, f"⚠️ {name} не был закреплён", pins_menu())
+        today = date_cls.today()
+        if is_working_day(today):
+            generate_for_date(today.isoformat())
+        send(peer_id, f"📌 {name} закреплён за «{sec}»\nРасписание на сегодня пересобрано.", pins_menu())
         reset_state(peer_id); return True
 
     if state == "edit_pick_date":
@@ -1776,31 +1722,34 @@ def handle_state(peer_id, user_id, text):
     if state == "edit_menu":
         date_iso = data.get("edit_date", "")
         t = text.strip()
+        workers_all = list_workers()
+
         if t == "🔀 Переставить":
-            st["state"] = "edit_move_name"
-            return send(peer_id, "Кого переставить?", cancel_menu())
+            if not workers_all:
+                return send(peer_id, "Нет работников", edit_menu())
+            return send(peer_id, "Кого переставить?", workers_inline("edit_move", workers_all))
         if t == "↔️ Поменять местами":
-            st["state"] = "edit_swap_first"
-            return send(peer_id, "Первый работник:", cancel_menu())
+            if not workers_all:
+                return send(peer_id, "Нет работников", edit_menu())
+            return send(peer_id, "Первый работник:", workers_inline("edit_swap_a", workers_all))
         if t == "➖ Убрать из смены":
-            st["state"] = "edit_remove_name"
-            return send(peer_id, "Кого убрать?", cancel_menu())
+            if not workers_all:
+                return send(peer_id, "Нет работников", edit_menu())
+            return send(peer_id, "Кого убрать?", workers_inline("edit_remove", workers_all))
         if t == "➕ Добавить в смену":
-            st["state"] = "edit_add_name"
-            return send(peer_id, "Кого добавить?", cancel_menu())
+            if not workers_all:
+                return send(peer_id, "Нет работников", edit_menu())
+            return send(peer_id, "Кого добавить?", workers_inline("edit_add", workers_all))
         if t == "🌙 Сменить 2-го сменщика":
-            st["state"] = "edit_second_name"
-            return send(peer_id, "Кто будет 2-м сменщиком?", cancel_menu())
+            if not workers_all:
+                return send(peer_id, "Нет работников", edit_menu())
+            return send(peer_id, "Кто будет 2-м сменщиком?", workers_inline("edit_second", workers_all))
         if t == "👁 Показать расписание":
             show_edit_menu(peer_id, date_iso); return True
         if t == "⬅️ Назад":
             reset_state(peer_id)
             return send(peer_id, "Главное меню", main_menu(get_role(user_id)))
         return send(peer_id, "Выберите кнопкой", edit_menu())
-
-    if state == "edit_move_name":
-        data["move_name"] = text.strip(); st["data"] = data; st["state"] = "edit_move_section"
-        return send(peer_id, f"На какой участок {data['move_name']}?", sections_menu())
 
     if state == "edit_move_section":
         sec = text.strip().lower()
@@ -1812,34 +1761,8 @@ def handle_state(peer_id, user_id, text):
             send(peer_id, f"✅ {name} → {sec}")
         else:
             send(peer_id, f"⚠️ Не найден")
-        st["state"] = "edit_menu"
+        user_states[peer_id] = {"state": "edit_menu", "data": {"edit_date": date_iso}}
         show_edit_menu(peer_id, date_iso); return True
-
-    if state == "edit_swap_first":
-        data["swap_a"] = text.strip(); st["data"] = data; st["state"] = "edit_swap_second"
-        return send(peer_id, f"С кем поменять {data['swap_a']}?", cancel_menu())
-
-    if state == "edit_swap_second":
-        data["swap_b"] = text.strip(); st["data"] = data
-        date_iso = data.get("edit_date", "")
-        ok, msg = swap_workers_in_schedule(date_iso, data.get("swap_a", ""), data.get("swap_b", ""))
-        send(peer_id, f"✅ Поменяли" if ok else f"⚠️ {msg}")
-        st["state"] = "edit_menu"
-        show_edit_menu(peer_id, date_iso); return True
-
-    if state == "edit_remove_name":
-        name = text.strip()
-        date_iso = data.get("edit_date", "")
-        if remove_worker_from_schedule(date_iso, name):
-            send(peer_id, f"➖ {name} убран")
-        else:
-            send(peer_id, f"⚠️ Не найден")
-        st["state"] = "edit_menu"
-        show_edit_menu(peer_id, date_iso); return True
-
-    if state == "edit_add_name":
-        data["add_name"] = text.strip(); st["data"] = data; st["state"] = "edit_add_section"
-        return send(peer_id, f"На какой участок {data['add_name']}?", sections_menu())
 
     if state == "edit_add_section":
         sec = text.strip().lower()
@@ -1851,17 +1774,7 @@ def handle_state(peer_id, user_id, text):
             send(peer_id, f"✅ {name} → {sec}")
         else:
             send(peer_id, f"⚠️ Не найден")
-        st["state"] = "edit_menu"
-        show_edit_menu(peer_id, date_iso); return True
-
-    if state == "edit_second_name":
-        name = text.strip()
-        date_iso = data.get("edit_date", "")
-        if set_day_second_shift(date_iso, name):
-            send(peer_id, f"✅ {name} — 2-я смена на день")
-        else:
-            send(peer_id, f"⚠️ Не найден")
-        st["state"] = "edit_menu"
+        user_states[peer_id] = {"state": "edit_menu", "data": {"edit_date": date_iso}}
         show_edit_menu(peer_id, date_iso); return True
 
     return False
@@ -1886,12 +1799,18 @@ def handle_button(peer_id, user_id, text):
         send(peer_id, "👥 Работники", workers_menu()); return True
     if t == "🤒 Заболел":
         if role not in ("admin", "manager"): return False
-        user_states[peer_id] = {"state": "wait_sick_name", "data": {}}
-        send(peer_id, "Кто заболел?", cancel_menu()); return True
+        workers = list_workers()
+        if not workers:
+            send(peer_id, "Нет работников", main_kb); return True
+        send(peer_id, "Кто заболел?", workers_inline("sick", workers))
+        return True
     if t == "✅ Вернулся":
         if role not in ("admin", "manager"): return False
-        user_states[peer_id] = {"state": "wait_back_name", "data": {}}
-        send(peer_id, "Кто вернулся?", cancel_menu()); return True
+        workers = list_workers()
+        if not workers:
+            send(peer_id, "Нет работников", main_kb); return True
+        send(peer_id, "Кто вернулся?", workers_inline("back", workers))
+        return True
     if t == "📆 Субботы":
         send(peer_id, "📆 Субботы", saturdays_menu()); return True
     if t == "📖 Журнал":
@@ -1963,25 +1882,33 @@ def handle_button(peer_id, user_id, text):
 
     if t == "➕ Добавить":
         user_states[peer_id] = {"state": "wait_add_name", "data": {}}
-        send(peer_id, "Имя:", cancel_menu()); return True
+        send(peer_id, "Введите имя нового работника:", cancel_menu()); return True
     if t == "🗑 Удалить":
-        user_states[peer_id] = {"state": "wait_remove_name", "data": {}}
-        send(peer_id, "Имя:", cancel_menu()); return True
+        workers = list_workers()
+        if not workers:
+            send(peer_id, "Нет работников", workers_menu()); return True
+        send(peer_id, "Кого удалить?", workers_inline("remove", workers)); return True
     if t == "📋 Список":
         action_workers_list(peer_id); return True
     if t == "📊 История":
-        user_states[peer_id] = {"state": "wait_history_name", "data": {}}
-        send(peer_id, "Имя работника:", cancel_menu()); return True
+        workers = list_workers()
+        if not workers:
+            send(peer_id, "Нет работников", workers_menu()); return True
+        send(peer_id, "Чья история?", workers_inline("history", workers)); return True
     if t == "🔗 Привязать VK":
-        user_states[peer_id] = {"state": "wait_bind_name", "data": {}}
-        send(peer_id, "Имя работника:", cancel_menu()); return True
+        workers = list_workers()
+        if not workers:
+            send(peer_id, "Нет работников", workers_menu()); return True
+        send(peer_id, "Кого привязать?", workers_inline("bind", workers)); return True
     if t == "🔓 Отвязать VK":
-        user_states[peer_id] = {"state": "wait_unbind_name", "data": {}}
-        send(peer_id, "Имя работника:", cancel_menu()); return True
+        workers = list_workers()
+        if not workers:
+            send(peer_id, "Нет работников", workers_menu()); return True
+        send(peer_id, "Кого отвязать?", workers_inline("unbind", workers)); return True
 
     if t == "➕ Суббота рабочая":
         user_states[peer_id] = {"state": "wait_workday_date", "data": {}}
-        send(peer_id, "Дата субботы:", cancel_menu()); return True
+        send(peer_id, "Дата субботы (ДД.ММ.ГГГГ):", cancel_menu()); return True
     if t == "➖ Суббота выходная":
         user_states[peer_id] = {"state": "wait_dayoff_date", "data": {}}
         send(peer_id, "Дата субботы:", cancel_menu()); return True
@@ -1989,7 +1916,7 @@ def handle_button(peer_id, user_id, text):
         action_saturdays_list(peer_id); return True
     if t == "🎉 Праздник добавить":
         user_states[peer_id] = {"state": "wait_holiday_add", "data": {}}
-        send(peer_id, "ДД.ММ.ГГГГ;Название", cancel_menu()); return True
+        send(peer_id, "Формат: ДД.ММ.ГГГГ;Название", cancel_menu()); return True
     if t == "🎉 Праздник удалить":
         user_states[peer_id] = {"state": "wait_holiday_remove", "data": {}}
         send(peer_id, "Дата праздника:", cancel_menu()); return True
@@ -2014,7 +1941,7 @@ def handle_button(peer_id, user_id, text):
         send(peer_id, "Дата:", cancel_menu()); return True
     if t == "📆 Отметить отсутствие":
         user_states[peer_id] = {"state": "wait_absence_name", "data": {}}
-        send(peer_id, "Имя:", cancel_menu()); return True
+        send(peer_id, "Имя работника:", cancel_menu()); return True
     if t == "✏️ Править расписание":
         if role != "admin": return False
         user_states[peer_id] = {"state": "edit_pick_date", "data": {}}
@@ -2022,8 +1949,10 @@ def handle_button(peer_id, user_id, text):
     if t == "🔧 Пересобрать":
         action_replan(peer_id); return True
     if t == "🌙 Назначить 2-ю":
-        user_states[peer_id] = {"state": "wait_second_set_name", "data": {}}
-        send(peer_id, "Имя:", cancel_menu()); return True
+        workers = list_workers()
+        if not workers:
+            send(peer_id, "Нет работников", more_menu()); return True
+        send(peer_id, "Кто будет 2-м сменщиком?", workers_inline("second_set", workers)); return True
     if t == "♻️ Сбросить 2-ю":
         user_states[peer_id] = {"state": "wait_second_reset_date", "data": {}}
         send(peer_id, "Дата недели:", cancel_menu()); return True
@@ -2045,11 +1974,15 @@ def handle_button(peer_id, user_id, text):
         if role != "admin": return False
         send(peer_id, "📌 Закрепления", pins_menu()); return True
     if t == "📌 Закрепить":
-        user_states[peer_id] = {"state": "pin_name", "data": {}}
-        send(peer_id, "Кого закрепить?", cancel_menu()); return True
+        workers = list_workers()
+        if not workers:
+            send(peer_id, "Нет работников", pins_menu()); return True
+        send(peer_id, "Кого закрепить?", workers_inline("pin", workers)); return True
     if t == "🔓 Открепить":
-        user_states[peer_id] = {"state": "unpin_name", "data": {}}
-        send(peer_id, "Кого открепить?", cancel_menu()); return True
+        workers = list_workers()
+        if not workers:
+            send(peer_id, "Нет работников", pins_menu()); return True
+        send(peer_id, "Кого открепить?", workers_inline("unpin", workers)); return True
     if t == "📋 Список закреплений":
         rows = list_pins()
         if not rows:
@@ -2130,12 +2063,18 @@ def handle_inline(event):
     user_id = event.object.user_id
     peer_id = event.object.peer_id
     try:
-        vk.messages.sendMessageEventAnswer(event_id=event.object.event_id, user_id=user_id, peer_id=peer_id)
+        vk.messages.sendMessageEventAnswer(
+            event_id=event.object.event_id, user_id=user_id, peer_id=peer_id
+        )
     except Exception:
         pass
+
     cmd = payload.get("cmd")
+
     if cmd == "cancel_inline":
-        send(peer_id, "Отменено", main_menu(get_role(user_id))); return
+        send(peer_id, "Отменено", main_menu(get_role(user_id)))
+        return
+
     if cmd == "confirm":
         action = payload.get("action")
         extra = payload.get("extra", "")
@@ -2149,6 +2088,142 @@ def handle_inline(event):
                 send(peer_id, f"🗑 Удалено", more_menu())
             else:
                 send(peer_id, "Нечего удалять", more_menu())
+        return
+
+    if cmd == "pick_w":
+        p = payload.get("p")
+        n = payload.get("n")
+        today = date_cls.today()
+        role = get_role(user_id)
+
+        if p == "pin":
+            user_states[peer_id] = {"state": "pin_section", "data": {"pin_name": n}}
+            send(peer_id, f"На какой участок закрепить «{n}»?", pin_sections_menu())
+            return
+
+        if p == "unpin":
+            w = get_worker_by_name(n)
+            if w and remove_pin(w["id"]):
+                if is_working_day(today):
+                    generate_for_date(today.isoformat())
+                send(peer_id, f"🔓 {n} откреплён\nРасписание пересобрано.", pins_menu())
+            else:
+                send(peer_id, f"⚠️ {n} не был закреплён", pins_menu())
+            return
+
+        if p == "sick":
+            if not is_working_day(today):
+                send(peer_id, "Сегодня выходной", main_menu(role))
+                return
+            old_rows = get_schedule(today.isoformat())
+            if not add_absence(n, today.isoformat(), "заболел"):
+                send(peer_id, f"⚠️ {n} не найден", main_menu(role))
+                return
+            generate_for_date(today.isoformat())
+            new_rows = get_schedule(today.isoformat())
+            diff = compare_schedules(old_rows, new_rows)
+            send(peer_id, f"🚫 {n} — заболел\n🔄 Изменения:\n{diff}", main_menu(role))
+            return
+
+        if p == "back":
+            if not remove_absence(n, today.isoformat()):
+                send(peer_id, f"⚠️ {n} не отмечен", main_menu(role))
+                return
+            generate_for_date(today.isoformat())
+            send(peer_id, f"✅ {n} вернулся", main_menu(role))
+            return
+
+        if p == "history":
+            shifts, absences = history_worker(n, 30)
+            if shifts is None:
+                send(peer_id, f"⚠️ {n} не найден", workers_menu())
+                return
+            lines = [f"📖 История: {n} (30 дней)", ""]
+            if shifts:
+                lines.append("Работал:")
+                for s in shifts:
+                    tag = "🌙" if s["shift"] == "second" else "☀️"
+                    sec = "" if s["shift"] == "second" else f" {s['section']}"
+                    lines.append(f"  • {s['date']} {tag}{sec}")
+            else:
+                lines.append("Работал: —")
+            lines.append("")
+            if absences:
+                lines.append("Отсутствовал:")
+                for a in absences:
+                    lines.append(f"  • {a['date']} — {a['reason'] or '—'}")
+            else:
+                lines.append("Отсутствовал: —")
+            send_long(peer_id, "\n".join(lines), workers_menu())
+            return
+
+        if p == "remove":
+            send(peer_id, f"Удалить {n}?", confirm_inline("remove_worker", n))
+            return
+
+        if p == "bind":
+            user_states[peer_id] = {"state": "wait_bind_vk", "data": {"name": n}}
+            send(peer_id, f"Введите VK ID для «{n}»:", cancel_menu())
+            return
+
+        if p == "unbind":
+            if unbind_vk(n):
+                send(peer_id, f"🔓 {n} отвязан", workers_menu())
+            else:
+                send(peer_id, f"⚠️ {n} не найден", workers_menu())
+            return
+
+        if p == "second_set":
+            user_states[peer_id] = {"state": "wait_second_set_date", "data": {"name": n}}
+            send(peer_id, f"Дата из недели для «{n}»:", cancel_menu())
+            return
+
+        st = user_states.get(peer_id, {})
+        date_iso = st.get("data", {}).get("edit_date", "")
+
+        if p == "edit_move":
+            user_states[peer_id] = {"state": "edit_move_section",
+                                    "data": {"edit_date": date_iso, "move_name": n}}
+            send(peer_id, f"На какой участок «{n}»?", sections_menu())
+            return
+
+        if p == "edit_swap_a":
+            user_states[peer_id] = {"state": "edit_swap_second",
+                                    "data": {"edit_date": date_iso, "swap_a": n}}
+            send(peer_id, f"С кем поменять «{n}»?", workers_inline("edit_swap_b", list_workers()))
+            return
+
+        if p == "edit_swap_b":
+            a = st.get("data", {}).get("swap_a", "")
+            ok, msg = swap_workers_in_schedule(date_iso, a, n)
+            send(peer_id, f"✅ Поменяли {a} ↔ {n}" if ok else f"⚠️ {msg}")
+            user_states[peer_id] = {"state": "edit_menu", "data": {"edit_date": date_iso}}
+            show_edit_menu(peer_id, date_iso)
+            return
+
+        if p == "edit_remove":
+            if remove_worker_from_schedule(date_iso, n):
+                send(peer_id, f"➖ {n} убран")
+            else:
+                send(peer_id, f"⚠️ Не найден")
+            user_states[peer_id] = {"state": "edit_menu", "data": {"edit_date": date_iso}}
+            show_edit_menu(peer_id, date_iso)
+            return
+
+        if p == "edit_add":
+            user_states[peer_id] = {"state": "edit_add_section",
+                                    "data": {"edit_date": date_iso, "add_name": n}}
+            send(peer_id, f"На какой участок «{n}»?", sections_menu())
+            return
+
+        if p == "edit_second":
+            if set_day_second_shift(date_iso, n):
+                send(peer_id, f"✅ {n} — 2-я смена на этот день")
+            else:
+                send(peer_id, f"⚠️ Не найден")
+            user_states[peer_id] = {"state": "edit_menu", "data": {"edit_date": date_iso}}
+            show_edit_menu(peer_id, date_iso)
+            return
 
 
 # ============================================================
