@@ -1,5 +1,5 @@
 # ============================================================
-# БОТ РАСПИСАНИЯ СМЕН — ЕДИНЫЙ ФАЙЛ (без inline-кнопок)
+# БОТ РАСПИСАНИЯ СМЕН — ЕДИНЫЙ ФАЙЛ + АВТОБЭКАП В VK
 # ============================================================
 import csv
 import io
@@ -28,6 +28,7 @@ AUTO_MORNING_HOUR = int(os.environ.get("AUTO_MORNING_HOUR", "7"))
 AUTO_MORNING_MIN = int(os.environ.get("AUTO_MORNING_MIN", "30"))
 AUTO_PLANNING_HOUR = int(os.environ.get("AUTO_PLANNING_HOUR", "20"))
 AUTO_BACKUP_HOUR = int(os.environ.get("AUTO_BACKUP_HOUR", "23"))
+AUTOBACKUP_INTERVAL_HOURS = int(os.environ.get("AUTOBACKUP_INTERVAL_HOURS", "6"))
 DB_PATH = os.environ.get("DB_PATH", "warehouse.db")
 
 if not VK_TOKEN or not VK_GROUP_ID:
@@ -890,7 +891,6 @@ def cancel_menu():
 
 
 def pick_workers_menu(workers, cols=2, extra_buttons=None):
-    """Обычная клавиатура со списком имён работников."""
     kb = VkKeyboard(one_time=False)
     n = len(workers)
     for i, w in enumerate(workers):
@@ -995,6 +995,80 @@ def reset_state(peer_id):
 
 
 # ============================================================
+# АВТОБЭКАП / ВОССТАНОВЛЕНИЕ ЧЕРЕЗ VK
+# ============================================================
+def backup_to_vk():
+    admin_id = VK_ADMIN_IDS[0] if VK_ADMIN_IDS else None
+    if not admin_id:
+        logging.warning("backup_to_vk: нет VK_ADMIN_IDS")
+        return False
+    if not os.path.exists(DB_PATH):
+        return False
+    try:
+        with open(DB_PATH, "rb") as f:
+            data = f.read()
+        filename = "warehouse_autobackup.db"
+        upload_url = vk.docs.getMessagesUploadServer(peer_id=admin_id, type="doc")["upload_url"]
+        files = {"file": (filename, data, "application/octet-stream")}
+        up = requests.post(upload_url, files=files).json()
+        saved = vk.docs.save(file=up["file"], title=filename)
+        doc = saved["doc"]
+        vk.messages.send(
+            peer_id=admin_id,
+            message=f"💾 Автобэкап базы ({len(data)} байт)",
+            attachment=f"doc{doc['owner_id']}_{doc['id']}",
+            random_id=random.randint(1, 2**31 - 1),
+        )
+        logging.info(f"backup_to_vk: OK, {len(data)} bytes")
+        return True
+    except Exception as e:
+        logging.warning(f"backup_to_vk error: {e}")
+        return False
+
+
+def restore_from_vk():
+    admin_id = VK_ADMIN_IDS[0] if VK_ADMIN_IDS else None
+    if not admin_id:
+        logging.warning("restore_from_vk: нет VK_ADMIN_IDS")
+        return False
+    try:
+        history = vk.messages.getHistory(user_id=admin_id, count=100)
+        for item in history.get("items", []):
+            if item.get("out") != 1:
+                continue
+            for att in item.get("attachments", []):
+                if att.get("type") != "doc":
+                    continue
+                doc = att["doc"]
+                title = doc.get("title", "")
+                if not title.endswith(".db"):
+                    continue
+                url = doc.get("url")
+                if not url:
+                    continue
+                r = requests.get(url, timeout=60)
+                r.raise_for_status()
+                if len(r.content) < 1000:
+                    continue
+                with open(DB_PATH, "wb") as f:
+                    f.write(r.content)
+                logging.info(f"restore_from_vk: OK, {len(r.content)} bytes (file: {title})")
+                return True
+        logging.info("restore_from_vk: бэкапов не найдено")
+        return False
+    except Exception as e:
+        logging.warning(f"restore_from_vk error: {e}")
+        return False
+
+
+def job_autobackup():
+    try:
+        backup_to_vk()
+    except Exception:
+        logging.exception("autobackup job")
+
+
+# ============================================================
 # IMAGE GEN
 # ============================================================
 _FONT_CACHE = {}
@@ -1055,7 +1129,6 @@ def _ensure_font_files():
                 r = requests.get(url, timeout=30)
                 r.raise_for_status()
                 if len(r.content) < 50000:
-                    logging.warning(f"font too small from {url}: {len(r.content)} bytes")
                     continue
                 with open(local, "wb") as f:
                     f.write(r.content)
@@ -1080,10 +1153,8 @@ def _font(size, bold=False):
     key = (size, bold)
     if key in _FONT_CACHE:
         return _FONT_CACHE[key]
-
     paths = _ensure_font_files()
     path = paths.get("bold" if bold else "regular") or paths.get("regular")
-
     if path and os.path.exists(path):
         try:
             f = ImageFont.truetype(path, size)
@@ -1091,7 +1162,6 @@ def _font(size, bold=False):
             return f
         except Exception as e:
             logging.warning(f"font load error: {e}")
-
     logging.warning("нет кириллического шрифта")
     return None
 
@@ -1221,8 +1291,9 @@ def start_scheduler():
     sched.add_job(job_morning, "cron", hour=AUTO_MORNING_HOUR, minute=AUTO_MORNING_MIN)
     sched.add_job(job_sunday_planning, "cron", day_of_week="sun", hour=AUTO_PLANNING_HOUR, minute=0)
     sched.add_job(job_backup, "cron", day_of_week="sun", hour=AUTO_BACKUP_HOUR, minute=0)
+    sched.add_job(job_autobackup, "interval", hours=AUTOBACKUP_INTERVAL_HOURS)
     sched.start()
-    logging.info(f"Scheduler started TZ={TZ_NAME}")
+    logging.info(f"Scheduler started TZ={TZ_NAME}, autobackup every {AUTOBACKUP_INTERVAL_HOURS}h")
 
 
 # ============================================================
@@ -1388,28 +1459,22 @@ def show_edit_menu(peer_id, date_iso):
 
 
 # ============================================================
-# HANDLE STATE — все "pick_*" состояния (обычные кнопки)
+# HANDLE PICK NAME
 # ============================================================
 def _handle_pick_name(peer_id, user_id, text, st, data):
-    """
-    Универсальная обработка состояний вида pick_<action>.
-    Возвращает True, если обработали.
-    """
     state = st["state"]
     if not state.startswith("pick_"):
         return False
 
-    action = state[5:]  # убираем "pick_"
+    action = state[5:]
     role = get_role(user_id)
     today = date_cls.today()
 
-    # Отмена
     if text.strip() in ("❌ Отмена", "❌ Нет"):
         reset_state(peer_id)
         send(peer_id, "❌ Отменено", main_menu(role))
         return True
 
-    # Проверяем, что это имя работника
     w = get_worker_by_name(text.strip())
     if not w:
         send(peer_id, "⚠️ Выберите имя из списка кнопками или нажмите «❌ Отмена»")
@@ -1417,24 +1482,25 @@ def _handle_pick_name(peer_id, user_id, text, st, data):
 
     name = w["name"]
 
-    # --- PIN ---
     if action == "pin_name":
         user_states[peer_id] = {"state": "pin_section", "data": {"pin_name": name}}
         send(peer_id, f"На какой участок закрепить «{name}»?", pin_sections_menu())
         return True
 
-    # --- UNPIN ---
     if action == "unpin_name":
         if remove_pin(w["id"]):
             if is_working_day(today):
                 generate_for_date(today.isoformat())
             send(peer_id, f"🔓 {name} откреплён\nРасписание пересобрано.", pins_menu())
+            try:
+                backup_to_vk()
+            except Exception:
+                pass
         else:
             send(peer_id, f"⚠️ {name} не был закреплён", pins_menu())
         reset_state(peer_id)
         return True
 
-    # --- SICK ---
     if action == "sick_name":
         if not is_working_day(today):
             send(peer_id, "Сегодня выходной", main_menu(role))
@@ -1449,7 +1515,6 @@ def _handle_pick_name(peer_id, user_id, text, st, data):
         send(peer_id, f"🚫 {name} — заболел\n🔄 Изменения:\n{diff}", main_menu(role))
         reset_state(peer_id); return True
 
-    # --- BACK ---
     if action == "back_name":
         if not remove_absence(name, today.isoformat()):
             send(peer_id, f"⚠️ {name} не отмечен", main_menu(role))
@@ -1458,7 +1523,6 @@ def _handle_pick_name(peer_id, user_id, text, st, data):
         send(peer_id, f"✅ {name} вернулся", main_menu(role))
         reset_state(peer_id); return True
 
-    # --- HISTORY ---
     if action == "history_name":
         shifts, absences = history_worker(name, 30)
         if shifts is None:
@@ -1483,19 +1547,16 @@ def _handle_pick_name(peer_id, user_id, text, st, data):
         send_long(peer_id, "\n".join(lines), workers_menu())
         reset_state(peer_id); return True
 
-    # --- REMOVE (подтверждение) ---
     if action == "remove_name":
         user_states[peer_id] = {"state": "confirm_remove", "data": {"name": name}}
         send(peer_id, f"Удалить работника «{name}»?", confirm_yes_no_menu())
         return True
 
-    # --- BIND VK ---
     if action == "bind_name":
         user_states[peer_id] = {"state": "wait_bind_vk", "data": {"name": name}}
         send(peer_id, f"Введите VK ID для «{name}» (число):", cancel_menu())
         return True
 
-    # --- UNBIND VK ---
     if action == "unbind_name":
         if unbind_vk(name):
             send(peer_id, f"🔓 {name} отвязан", workers_menu())
@@ -1503,13 +1564,11 @@ def _handle_pick_name(peer_id, user_id, text, st, data):
             send(peer_id, f"⚠️ {name} не найден", workers_menu())
         reset_state(peer_id); return True
 
-    # --- SECOND SET ---
     if action == "second_set_name":
         user_states[peer_id] = {"state": "wait_second_set_date", "data": {"name": name}}
         send(peer_id, f"Дата из нужной недели для «{name}» (ДД.ММ.ГГГГ):", cancel_menu())
         return True
 
-    # --- EDIT MOVE ---
     if action == "edit_move_name":
         date_iso = data.get("edit_date", "")
         user_states[peer_id] = {"state": "edit_move_section",
@@ -1517,7 +1576,6 @@ def _handle_pick_name(peer_id, user_id, text, st, data):
         send(peer_id, f"На какой участок «{name}»?", sections_menu())
         return True
 
-    # --- EDIT SWAP A ---
     if action == "edit_swap_a":
         date_iso = data.get("edit_date", "")
         user_states[peer_id] = {"state": "pick_edit_swap_b",
@@ -1526,7 +1584,6 @@ def _handle_pick_name(peer_id, user_id, text, st, data):
         send(peer_id, f"С кем поменять «{name}»?", pick_workers_menu(workers))
         return True
 
-    # --- EDIT SWAP B ---
     if action == "edit_swap_b":
         date_iso = data.get("edit_date", "")
         a = data.get("swap_a", "")
@@ -1536,7 +1593,6 @@ def _handle_pick_name(peer_id, user_id, text, st, data):
         show_edit_menu(peer_id, date_iso)
         return True
 
-    # --- EDIT REMOVE ---
     if action == "edit_remove_name":
         date_iso = data.get("edit_date", "")
         if remove_worker_from_schedule(date_iso, name):
@@ -1547,7 +1603,6 @@ def _handle_pick_name(peer_id, user_id, text, st, data):
         show_edit_menu(peer_id, date_iso)
         return True
 
-    # --- EDIT ADD ---
     if action == "edit_add_name":
         date_iso = data.get("edit_date", "")
         user_states[peer_id] = {"state": "edit_add_section",
@@ -1555,7 +1610,6 @@ def _handle_pick_name(peer_id, user_id, text, st, data):
         send(peer_id, f"На какой участок «{name}»?", sections_menu())
         return True
 
-    # --- EDIT SECOND ---
     if action == "edit_second_name":
         date_iso = data.get("edit_date", "")
         if set_day_second_shift(date_iso, name):
@@ -1569,12 +1623,14 @@ def _handle_pick_name(peer_id, user_id, text, st, data):
     return False
 
 
+# ============================================================
+# HANDLE STATE
+# ============================================================
 def handle_state(peer_id, user_id, text):
     st = user_states.get(peer_id)
     if not st:
         return False
 
-    # Отмена всегда работает
     if text.strip() == "❌ Отмена":
         reset_state(peer_id)
         send(peer_id, "❌ Отменено", main_menu(get_role(user_id)))
@@ -1583,17 +1639,19 @@ def handle_state(peer_id, user_id, text):
     state = st["state"]
     data = st.get("data", {})
 
-    # --- Универсальный обработчик pick_* ---
     if state.startswith("pick_"):
         return _handle_pick_name(peer_id, user_id, text, st, data)
 
-    # --- Подтверждение удаления работника ---
     if state == "confirm_remove":
         t = text.strip().lower()
         name = data.get("name", "")
         if t in ("✅ да", "да", "yes", "y"):
             if remove_worker(name):
                 send(peer_id, f"🗑 Удалён: {name}", workers_menu())
+                try:
+                    backup_to_vk()
+                except Exception:
+                    pass
             else:
                 send(peer_id, f"⚠️ {name} не найден", workers_menu())
         else:
@@ -1601,11 +1659,14 @@ def handle_state(peer_id, user_id, text):
         reset_state(peer_id)
         return True
 
-    # --- Дальше пошли конкретные состояния ---
     if state == "wait_add_name":
         name = text.strip()
         if add_worker(name):
             send(peer_id, f"✅ Добавлен: {name}", workers_menu())
+            try:
+                backup_to_vk()
+            except Exception:
+                pass
         else:
             send(peer_id, f"⚠️ {name} уже в списке", workers_menu())
         reset_state(peer_id); return True
@@ -1618,6 +1679,10 @@ def handle_state(peer_id, user_id, text):
         name = data.get("name", "")
         if bind_vk(name, vk_id):
             send(peer_id, f"✅ {name} → VK:{vk_id}", workers_menu())
+            try:
+                backup_to_vk()
+            except Exception:
+                pass
         else:
             send(peer_id, f"⚠️ {name} не найден", workers_menu())
         reset_state(peer_id); return True
@@ -1674,8 +1739,7 @@ def handle_state(peer_id, user_id, text):
         d = parse_date(text)
         if not d:
             return send(peer_id, "❌ ДД.ММ.ГГГГ", cancel_menu())
-        name = d.isoformat()
-        user_states[peer_id] = {"state": "confirm_clear_sched", "data": {"date": name}}
+        user_states[peer_id] = {"state": "confirm_clear_sched", "data": {"date": d.isoformat()}}
         send(peer_id, f"Удалить расписание на {d.strftime('%d.%m.%Y')}?", confirm_yes_no_menu())
         return True
 
@@ -1891,6 +1955,10 @@ def handle_state(peer_id, user_id, text):
         if is_working_day(today):
             generate_for_date(today.isoformat())
         send(peer_id, f"📌 {name} закреплён за «{sec}»\nРасписание пересобрано.", pins_menu())
+        try:
+            backup_to_vk()
+        except Exception:
+            pass
         reset_state(peer_id); return True
 
     if state == "edit_pick_date":
@@ -2161,12 +2229,11 @@ def handle_button(peer_id, user_id, text):
     if t == "🔔 Рассылки":
         send(peer_id, "🔔 Рассылки", broadcast_menu()); return True
     if t == "💾 Бэкап сейчас":
-        try:
-            with open(DB_PATH, "rb") as f:
-                send_doc(peer_id, f.read(), f"backup_{date_cls.today().isoformat()}.db")
+        ok = backup_to_vk()
+        if ok:
             send(peer_id, "✅ Бэкап отправлен", more_menu())
-        except Exception as e:
-            send(peer_id, f"⚠️ {e}", more_menu())
+        else:
+            send(peer_id, "⚠️ Не удалось отправить бэкап (проверь VK_ADMIN_IDS)", more_menu())
         return True
 
     if t == "📌 Закрепления":
@@ -2262,8 +2329,36 @@ def handle_button(peer_id, user_id, text):
 # MAIN
 # ============================================================
 def main():
+    # 1. Проверяем, пуста ли база
+    need_restore = True
+    if os.path.exists(DB_PATH) and os.path.getsize(DB_PATH) > 5000:
+        try:
+            init_db()
+            if list_workers():
+                need_restore = False
+                logging.info("DB уже есть, восстановление не нужно")
+        except Exception as e:
+            logging.warning(f"DB check failed: {e}")
+            need_restore = True
+
+    # 2. Если пусто — восстанавливаем из VK
+    if need_restore:
+        logging.info("DB пустая — пробуем восстановить из VK…")
+        restore_from_vk()
+
+    # 3. Инициализируем таблицы
     init_db()
-    logging.info("VK bot starting…")
+
+    workers = list_workers()
+    logging.info(f"VK bot starting… работников: {len(workers)}")
+
+    # 4. Сразу после старта — свежий бэкап, если есть что бэкапить
+    if workers:
+        try:
+            backup_to_vk()
+        except Exception:
+            pass
+
     start_scheduler()
 
     for event in longpoll.listen():
