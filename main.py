@@ -387,7 +387,6 @@ def export_rows(start, end):
                ORDER BY s.date, s.shift, w.name""", (start, end)).fetchall()
 
 
-# --- Ручная правка ---
 def move_worker_in_schedule(date_str, name, new_section):
     w = get_worker_by_name(name)
     if not w:
@@ -469,7 +468,6 @@ def set_assembly_size(date_str, n):
     set_setting(f"asm_{date_str}", str(n))
 
 
-# --- Закрепления ---
 def set_pin(worker_id, section):
     with get_db() as conn:
         conn.execute("INSERT OR REPLACE INTO worker_pins (worker_id, section) VALUES (?,?)",
@@ -600,13 +598,11 @@ def generate_for_date(date_str):
         free = free[need:]
 
     warehouse4 = pinned.get("склад №4", [])
-
     loading = pinned.get("погрузка", []) + free
 
     assignments = []
     if second_id is not None:
         assignments.append({"worker_id": second_id, "section": "—", "shift": "second"})
-
     for w in receiving:
         assignments.append({"worker_id": w["id"], "section": "приёмка", "shift": "day"})
     for w in assembly:
@@ -985,21 +981,86 @@ def reset_state(peer_id):
 
 
 # ============================================================
-# IMAGE GEN
+# IMAGE GEN — со скачиванием шрифта DejaVu
 # ============================================================
-def _font(size, bold=False):
-    from PIL import ImageFont
-    candidates = [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-        "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/TTF/DejaVuSans.ttf",
-    ]
-    for path in candidates:
-        try:
-            return ImageFont.truetype(path, size)
-        except Exception:
+_FONT_CACHE = {}
+_FONT_PATHS = {}
+
+
+def _ensure_font_files():
+    """Скачивает DejaVuSans один раз. Кэширует локально рядом с БД."""
+    global _FONT_PATHS
+    if _FONT_PATHS:
+        return _FONT_PATHS
+
+    sys_paths = {
+        "regular": [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/TTF/DejaVuSans.ttf",
+            "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        ],
+        "bold": [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+        ],
+    }
+
+    found = {}
+    for key, paths in sys_paths.items():
+        for p in paths:
+            if os.path.exists(p):
+                found[key] = p
+                break
+
+    base_dir = os.path.dirname(os.path.abspath(DB_PATH)) or "."
+    urls = {
+        "regular": "https://github.com/dejavu-fonts/dejavu-fonts/raw/master/ttf/DejaVuSans.ttf",
+        "bold": "https://github.com/dejavu-fonts/dejavu-fonts/raw/master/ttf/DejaVuSans-Bold.ttf",
+    }
+    for key, url in urls.items():
+        if key in found:
             continue
-    return ImageFont.load_default()
+        local = os.path.join(base_dir, f"font_{key}.ttf")
+        if not os.path.exists(local):
+            try:
+                r = requests.get(url, timeout=30)
+                r.raise_for_status()
+                with open(local, "wb") as f:
+                    f.write(r.content)
+                logging.info(f"font downloaded: {local}")
+            except Exception as e:
+                logging.warning(f"font download failed ({key}): {e}")
+                continue
+        found[key] = local
+
+    _FONT_PATHS = found
+    return found
+
+
+def _font(size, bold=False):
+    """Шрифт с поддержкой кириллицы. Кэшируется."""
+    from PIL import ImageFont
+    key = (size, bold)
+    if key in _FONT_CACHE:
+        return _FONT_CACHE[key]
+
+    paths = _ensure_font_files()
+    path = paths.get("bold" if bold else "regular") or paths.get("regular")
+
+    if path and os.path.exists(path):
+        try:
+            f = ImageFont.truetype(path, size)
+            _FONT_CACHE[key] = f
+            return f
+        except Exception as e:
+            logging.warning(f"font load error: {e}")
+
+    f = ImageFont.load_default()
+    _FONT_CACHE[key] = f
+    return f
 
 
 def render_day(date_obj, rows):
@@ -1054,7 +1115,7 @@ def render_day(date_obj, rows):
 
 
 # ============================================================
-# TASKS (расписание автоотправки)
+# TASKS
 # ============================================================
 def job_morning():
     try:
@@ -1303,7 +1364,6 @@ def handle_state(peer_id, user_id, text):
     state = st["state"]
     data = st.get("data", {})
 
-    # --- Работники ---
     if state == "wait_add_name":
         name = text.strip()
         if add_worker(name):
@@ -1368,7 +1428,6 @@ def handle_state(peer_id, user_id, text):
             send(peer_id, f"⚠️ {name} не найден", workers_menu())
         reset_state(peer_id); return True
 
-    # --- Больничные ---
     if state == "wait_sick_name":
         name = text.strip()
         today = date_cls.today()
@@ -1404,7 +1463,6 @@ def handle_state(peer_id, user_id, text):
         send(peer_id, f"✅ {name} вернулся\n🔄 Изменения:\n{diff}", main_menu(get_role(user_id)))
         reset_state(peer_id); return True
 
-    # --- Субботы / праздники ---
     if state in ("wait_workday_date", "wait_dayoff_date"):
         d = parse_date(text)
         if not d:
@@ -1437,7 +1495,6 @@ def handle_state(peer_id, user_id, text):
             send(peer_id, "Не найдено", saturdays_menu())
         reset_state(peer_id); return True
 
-    # --- Даты ---
     if state == "wait_show_date":
         d = parse_date(text)
         if not d:
@@ -1463,7 +1520,6 @@ def handle_state(peer_id, user_id, text):
              confirm_inline("clear_schedule", d.isoformat()))
         return True
 
-    # --- Отсутствия ---
     if state == "wait_absence_name":
         data["name"] = text.strip(); st["data"] = data; st["state"] = "wait_absence_date"
         return send(peer_id, f"Дата для {data['name']} (ДД.ММ.ГГГГ):", cancel_menu())
@@ -1484,7 +1540,6 @@ def handle_state(peer_id, user_id, text):
             send(peer_id, "⚠️ Не найден", more_menu())
         reset_state(peer_id); return True
 
-    # --- 2-я смена ---
     if state == "wait_second_set_name":
         data["name"] = text.strip(); st["data"] = data; st["state"] = "wait_second_set_date"
         return send(peer_id, "Дата из недели:", cancel_menu())
@@ -1514,7 +1569,6 @@ def handle_state(peer_id, user_id, text):
             send(peer_id, "Нечего сбрасывать", more_menu())
         reset_state(peer_id); return True
 
-    # --- Журнал ---
     if state == "wait_journal_date":
         d = parse_date(text)
         if not d:
@@ -1624,7 +1678,6 @@ def handle_state(peer_id, user_id, text):
             send(peer_id, f"⚠️ {e}", journal_menu())
         reset_state(peer_id); return True
 
-    # --- Рассылки ---
     if state == "wait_broadcast_add":
         try:
             pid = int(text.strip())
@@ -1645,7 +1698,6 @@ def handle_state(peer_id, user_id, text):
             send(peer_id, "Не найден", broadcast_menu())
         reset_state(peer_id); return True
 
-    # --- Worker ---
     if state == "worker_sick_confirm":
         if text.strip().lower() in ("да", "yes", "y", "✅"):
             w = get_worker_by_vk(user_id)
@@ -1659,7 +1711,6 @@ def handle_state(peer_id, user_id, text):
             send(peer_id, "Отменено", worker_menu())
         reset_state(peer_id); return True
 
-    # --- Закрепления ---
     if state == "pin_name":
         name = text.strip()
         w = get_worker_by_name(name)
@@ -1694,7 +1745,6 @@ def handle_state(peer_id, user_id, text):
             send(peer_id, f"⚠️ {name} не был закреплён", pins_menu())
         reset_state(peer_id); return True
 
-    # --- Правка расписания ---
     if state == "edit_pick_date":
         if text.strip().lower() in ("сегодня", "today"):
             d = date_cls.today()
@@ -1837,7 +1887,6 @@ def handle_button(peer_id, user_id, text):
     if t == "❓ Помощь":
         send(peer_id, HELP_TEXT, main_kb); return True
 
-    # --- Сборка ---
     if t == "🏗️ Сборка":
         if role not in ("admin", "manager"): return False
         today = date_cls.today()
@@ -1897,7 +1946,6 @@ def handle_button(peer_id, user_id, text):
         asm = [r["name"] for r in day if r["section"] == "сборка"]
         send(peer_id, f"🔄 Пересобрано. Сборка: {', '.join(asm) or '—'}", assembly_menu()); return True
 
-    # --- Работники ---
     if t == "➕ Добавить":
         user_states[peer_id] = {"state": "wait_add_name", "data": {}}
         send(peer_id, "Имя:", cancel_menu()); return True
@@ -1916,7 +1964,6 @@ def handle_button(peer_id, user_id, text):
         user_states[peer_id] = {"state": "wait_unbind_name", "data": {}}
         send(peer_id, "Имя работника:", cancel_menu()); return True
 
-    # --- Субботы ---
     if t == "➕ Суббота рабочая":
         user_states[peer_id] = {"state": "wait_workday_date", "data": {}}
         send(peer_id, "Дата субботы:", cancel_menu()); return True
@@ -1932,7 +1979,6 @@ def handle_button(peer_id, user_id, text):
         user_states[peer_id] = {"state": "wait_holiday_remove", "data": {}}
         send(peer_id, "Дата праздника:", cancel_menu()); return True
 
-    # --- Журнал ---
     if t == "📖 Журнал сегодня":
         action_journal_today(peer_id); return True
     if t == "📅 Журнал за дату":
@@ -1948,7 +1994,6 @@ def handle_button(peer_id, user_id, text):
         user_states[peer_id] = {"state": "wait_export_start", "data": {}}
         send(peer_id, "Начало:", cancel_menu()); return True
 
-    # --- Ещё ---
     if t == "📅 На дату":
         user_states[peer_id] = {"state": "wait_show_date", "data": {}}
         send(peer_id, "Дата:", cancel_menu()); return True
@@ -1981,7 +2026,6 @@ def handle_button(peer_id, user_id, text):
             send(peer_id, f"⚠️ {e}", more_menu())
         return True
 
-    # --- Закрепления ---
     if t == "📌 Закрепления":
         if role != "admin": return False
         send(peer_id, "📌 Закрепления", pins_menu()); return True
@@ -2005,7 +2049,6 @@ def handle_button(peer_id, user_id, text):
                 lines.append(f"  • {sec.capitalize()}: {', '.join(names)}")
         send(peer_id, "\n".join(lines), pins_menu()); return True
 
-    # --- Рассылки ---
     if t == "➕ Добавить чат":
         user_states[peer_id] = {"state": "wait_broadcast_add", "data": {}}
         send(peer_id, "peer_id:", cancel_menu()); return True
@@ -2017,7 +2060,6 @@ def handle_button(peer_id, user_id, text):
         txt = "📋 Чаты:\n" + ("\n".join(f"  • {p}" for p in pids) if pids else "  — пусто")
         send(peer_id, txt, broadcast_menu()); return True
 
-    # --- Worker ---
     if t == "📅 Моё расписание":
         w = get_worker_by_vk(user_id)
         if not w: return False
