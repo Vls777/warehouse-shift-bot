@@ -180,14 +180,6 @@ def get_absent_ids(date_str):
         return {r["worker_id"] for r in rows}
 
 
-def list_absences(date_str):
-    with get_db() as conn:
-        return conn.execute(
-            """SELECT w.name, a.reason FROM absences a
-               JOIN workers w ON w.id = a.worker_id
-               WHERE a.date = ? ORDER BY w.name""", (date_str,)).fetchall()
-
-
 def get_schedule(date_str):
     with get_db() as conn:
         return conn.execute(
@@ -478,12 +470,6 @@ def remove_pin(worker_id):
     with get_db() as conn:
         cur = conn.execute("DELETE FROM worker_pins WHERE worker_id=?", (worker_id,))
         return cur.rowcount > 0
-
-
-def get_pin(worker_id):
-    with get_db() as conn:
-        row = conn.execute("SELECT section FROM worker_pins WHERE worker_id=?", (worker_id,)).fetchone()
-        return row["section"] if row else None
 
 
 def list_pins():
@@ -934,14 +920,19 @@ def send_long(peer_id, text, keyboard=None):
 
 def send_photo(peer_id, png_bytes, caption=""):
     try:
+        logging.info(f"send_photo: {len(png_bytes)} bytes")
         upload_url = vk.photos.getMessagesUploadServer(peer_id=peer_id)["upload_url"]
         files = {"photo": ("schedule.png", png_bytes, "image/png")}
         resp = requests.post(upload_url, files=files).json()
+        if not resp.get("photo"):
+            logging.warning(f"VK upload returned: {resp}")
+            return
         saved = vk.photos.saveMessagesPhoto(photo=resp["photo"], server=resp["server"], hash=resp["hash"])
         p = saved[0]
         vk.messages.send(peer_id=peer_id, message=caption,
                          attachment=f"photo{p['owner_id']}_{p['id']}",
                          random_id=random.randint(1, 2**31 - 1))
+        logging.info("send_photo: OK")
     except Exception as e:
         logging.warning(f"send_photo error: {e}")
 
@@ -981,14 +972,13 @@ def reset_state(peer_id):
 
 
 # ============================================================
-# IMAGE GEN — со скачиванием шрифта DejaVu
+# IMAGE GEN — со скачиванием шрифта DejaVu (рабочие URL)
 # ============================================================
 _FONT_CACHE = {}
 _FONT_PATHS = {}
 
 
 def _ensure_font_files():
-    """Скачивает DejaVuSans один раз. Кэширует локально рядом с БД."""
     global _FONT_PATHS
     if _FONT_PATHS:
         return _FONT_PATHS
@@ -1013,35 +1003,56 @@ def _ensure_font_files():
         for p in paths:
             if os.path.exists(p):
                 found[key] = p
+                logging.info(f"font found in system: {p}")
                 break
 
     base_dir = os.path.dirname(os.path.abspath(DB_PATH)) or "."
+
     urls = {
-        "regular": "https://github.com/dejavu-fonts/dejavu-fonts/raw/master/ttf/DejaVuSans.ttf",
-        "bold": "https://github.com/dejavu-fonts/dejavu-fonts/raw/master/ttf/DejaVuSans-Bold.ttf",
+        "regular": [
+            "https://raw.githubusercontent.com/matplotlib/matplotlib/main/lib/matplotlib/mpl-data/fonts/ttf/DejaVuSans.ttf",
+            "https://cdn.jsdelivr.net/gh/matplotlib/matplotlib@main/lib/matplotlib/mpl-data/fonts/ttf/DejaVuSans.ttf",
+        ],
+        "bold": [
+            "https://raw.githubusercontent.com/matplotlib/matplotlib/main/lib/matplotlib/mpl-data/fonts/ttf/DejaVuSans-Bold.ttf",
+            "https://cdn.jsdelivr.net/gh/matplotlib/matplotlib@main/lib/matplotlib/mpl-data/fonts/ttf/DejaVuSans-Bold.ttf",
+        ],
     }
-    for key, url in urls.items():
+
+    for key, url_list in urls.items():
         if key in found:
             continue
         local = os.path.join(base_dir, f"font_{key}.ttf")
-        if not os.path.exists(local):
+        if os.path.exists(local) and os.path.getsize(local) > 50000:
+            found[key] = local
+            logging.info(f"font cached: {local}")
+            continue
+        for url in url_list:
             try:
                 r = requests.get(url, timeout=30)
                 r.raise_for_status()
+                if len(r.content) < 50000:
+                    logging.warning(f"font too small from {url}: {len(r.content)} bytes")
+                    continue
                 with open(local, "wb") as f:
                     f.write(r.content)
-                logging.info(f"font downloaded: {local}")
+                logging.info(f"font downloaded ({key}): {len(r.content)} bytes")
+                found[key] = local
+                break
             except Exception as e:
-                logging.warning(f"font download failed ({key}): {e}")
+                logging.warning(f"font download failed ({key}): {url} -> {e}")
                 continue
-        found[key] = local
 
     _FONT_PATHS = found
     return found
 
 
+def _has_font():
+    paths = _ensure_font_files()
+    return bool(paths.get("regular"))
+
+
 def _font(size, bold=False):
-    """Шрифт с поддержкой кириллицы. Кэшируется."""
     from PIL import ImageFont
     key = (size, bold)
     if key in _FONT_CACHE:
@@ -1058,9 +1069,8 @@ def _font(size, bold=False):
         except Exception as e:
             logging.warning(f"font load error: {e}")
 
-    f = ImageFont.load_default()
-    _FONT_CACHE[key] = f
-    return f
+    logging.warning("нет кириллического шрифта")
+    return None
 
 
 def render_day(date_obj, rows):
@@ -1130,10 +1140,12 @@ def job_morning():
         ws = week_start(today).isoformat()
         ww = get_week_assignment_worker(ws)
         text = fmt_schedule(rows, today, dt, ww)
-        try:
-            png = render_day(today, rows)
-        except Exception:
-            png = None
+        png = None
+        if _has_font():
+            try:
+                png = render_day(today, rows)
+            except Exception as e:
+                logging.warning(f"morning image: {e}")
         for peer_id in list_broadcast_targets():
             send(peer_id, text)
             if png:
@@ -1207,6 +1219,9 @@ def action_today(peer_id):
     ww = get_week_assignment_worker(ws)
     send_long(peer_id, fmt_schedule(rows, d, day_type_for(d), ww), main_menu())
     try:
+        if not _has_font():
+            logging.warning("Нет шрифта — картинка пропущена")
+            return
         png = render_day(d, rows)
         send_photo(peer_id, png, "")
     except Exception as e:
