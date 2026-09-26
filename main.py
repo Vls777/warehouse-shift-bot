@@ -1461,6 +1461,13 @@ def show_edit_menu(peer_id, date_iso):
 # ============================================================
 # HANDLE PICK NAME
 # ============================================================
+MENU_PREFIXES = (
+    "📅", "🏗️", "🌙", "👥", "🤒", "✅", "📆", "📖", "⚙️", "❓",
+    "➕", "🗑", "🔗", "🔓", "📋", "📊", "🎉", "📎", "✏️", "🔧",
+    "♻️", "💾", "📌", "🔔", "⬅️", "🔀", "↔️", "➖", "👁", "🔄",
+)
+
+
 def _handle_pick_name(peer_id, user_id, text, st, data):
     state = st["state"]
     if not state.startswith("pick_"):
@@ -1475,7 +1482,13 @@ def _handle_pick_name(peer_id, user_id, text, st, data):
         send(peer_id, "❌ Отменено", main_menu(role))
         return True
 
-    w = get_worker_by_name(text.strip())
+    # Если нажали кнопку меню — сбросить state и отдать в handle_button
+    t = text.strip()
+    if t.startswith(MENU_PREFIXES):
+        reset_state(peer_id)
+        return False
+
+    w = get_worker_by_name(t)
     if not w:
         send(peer_id, "⚠️ Выберите имя из списка кнопками или нажмите «❌ Отмена»")
         return True
@@ -1982,28 +1995,45 @@ def handle_state(peer_id, user_id, text):
         if t == "🔀 Переставить":
             if not workers_all:
                 return send(peer_id, "Нет работников", edit_menu())
+            user_states[peer_id] = {"state": "pick_edit_move_name",
+                                    "data": {"edit_date": date_iso}}
             return send(peer_id, "Кого переставить?", pick_workers_menu(workers_all))
+
         if t == "↔️ Поменять местами":
             if not workers_all:
                 return send(peer_id, "Нет работников", edit_menu())
+            user_states[peer_id] = {"state": "pick_edit_swap_a",
+                                    "data": {"edit_date": date_iso}}
             return send(peer_id, "Первый работник:", pick_workers_menu(workers_all))
+
         if t == "➖ Убрать из смены":
             if not workers_all:
                 return send(peer_id, "Нет работников", edit_menu())
+            user_states[peer_id] = {"state": "pick_edit_remove_name",
+                                    "data": {"edit_date": date_iso}}
             return send(peer_id, "Кого убрать?", pick_workers_menu(workers_all))
+
         if t == "➕ Добавить в смену":
             if not workers_all:
                 return send(peer_id, "Нет работников", edit_menu())
+            user_states[peer_id] = {"state": "pick_edit_add_name",
+                                    "data": {"edit_date": date_iso}}
             return send(peer_id, "Кого добавить?", pick_workers_menu(workers_all))
+
         if t == "🌙 Сменить 2-го сменщика":
             if not workers_all:
                 return send(peer_id, "Нет работников", edit_menu())
+            user_states[peer_id] = {"state": "pick_edit_second_name",
+                                    "data": {"edit_date": date_iso}}
             return send(peer_id, "Кто будет 2-м сменщиком?", pick_workers_menu(workers_all))
+
         if t == "👁 Показать расписание":
             show_edit_menu(peer_id, date_iso); return True
+
         if t == "⬅️ Назад":
             reset_state(peer_id)
             return send(peer_id, "Главное меню", main_menu(get_role(user_id)))
+
         return send(peer_id, "Выберите кнопкой", edit_menu())
 
     if state == "edit_move_section":
@@ -2329,7 +2359,6 @@ def handle_button(peer_id, user_id, text):
 # MAIN
 # ============================================================
 def main():
-    # 1. Проверяем, пуста ли база
     need_restore = True
     if os.path.exists(DB_PATH) and os.path.getsize(DB_PATH) > 5000:
         try:
@@ -2341,18 +2370,15 @@ def main():
             logging.warning(f"DB check failed: {e}")
             need_restore = True
 
-    # 2. Если пусто — восстанавливаем из VK
     if need_restore:
         logging.info("DB пустая — пробуем восстановить из VK…")
         restore_from_vk()
 
-    # 3. Инициализируем таблицы
     init_db()
 
     workers = list_workers()
     logging.info(f"VK bot starting… работников: {len(workers)}")
 
-    # 4. Сразу после старта — свежий бэкап, если есть что бэкапить
     if workers:
         try:
             backup_to_vk()
