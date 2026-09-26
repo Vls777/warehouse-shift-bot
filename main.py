@@ -42,6 +42,32 @@ longpoll = VkBotLongPoll(vk_session, VK_GROUP_ID)
 
 user_states: dict = {}
 
+BUTTON_KEYWORDS = (
+    "Сегодня", "Неделя", "Сборка", "2-я смена", "Работники",
+    "Заболел", "Вернулся", "Субботы", "Журнал", "Ещё", "Помощь",
+    "Добавить", "Удалить", "Список", "История", "Привязать", "Отвязать",
+    "Суббота рабочая", "Суббота выходная", "Список суббот",
+    "Праздник добавить", "Праздник удалить",
+    "Журнал сегодня", "Журнал за дату", "Аналитика", "Отсутствия", "Экспорт CSV",
+    "На дату", "Отметить отсутствие", "Править расписание", "Пересобрать",
+    "Закрепления", "Рассылки", "Назначить 2-ю", "Сбросить 2-ю",
+    "Удалить расписание", "Бэкап сейчас", "Закрепить", "Открепить",
+    "Список закреплений", "Добавить чат", "Удалить чат", "Список чатов",
+    "Моё расписание", "Я заболел", "Я вернулся", "Профиль",
+    "Переставить", "Поменять местами", "Убрать из смены", "Добавить в смену",
+    "Сменить 2-го сменщика", "Показать расписание",
+    "Да", "Нет", "Назад", "Отмена",
+    "приёмка", "сборка", "погрузка", "склад №4",
+)
+
+
+def _is_menu_button(text):
+    t = text.strip()
+    for kw in BUTTON_KEYWORDS:
+        if kw in t:
+            return True
+    return False
+
 
 # ============================================================
 # STORAGE
@@ -1294,7 +1320,7 @@ def start_scheduler():
     sched.add_job(job_autobackup, "interval", hours=AUTOBACKUP_INTERVAL_HOURS)
     sched.start()
     logging.info(f"Scheduler started TZ={TZ_NAME}, autobackup every {AUTOBACKUP_INTERVAL_HOURS}h")
-
+    
 
 # ============================================================
 # ACTIONS
@@ -1315,7 +1341,6 @@ def action_today(peer_id):
     send_long(peer_id, fmt_schedule(rows, d, day_type_for(d), ww), kb)
     try:
         if not _has_font():
-            logging.warning("Нет шрифта — картинка пропущена")
             return
         png = render_day(d, rows)
         send_photo(peer_id, png, "", keyboard=kb)
@@ -1461,13 +1486,6 @@ def show_edit_menu(peer_id, date_iso):
 # ============================================================
 # HANDLE PICK NAME
 # ============================================================
-MENU_PREFIXES = (
-    "📅", "🏗️", "🌙", "👥", "🤒", "✅", "📆", "📖", "⚙️", "❓",
-    "➕", "🗑", "🔗", "🔓", "📋", "📊", "🎉", "📎", "✏️", "🔧",
-    "♻️", "💾", "📌", "🔔", "⬅️", "🔀", "↔️", "➖", "👁", "🔄",
-)
-
-
 def _handle_pick_name(peer_id, user_id, text, st, data):
     state = st["state"]
     if not state.startswith("pick_"):
@@ -1482,9 +1500,8 @@ def _handle_pick_name(peer_id, user_id, text, st, data):
         send(peer_id, "❌ Отменено", main_menu(role))
         return True
 
-    # Если нажали кнопку меню — сбросить state и отдать в handle_button
     t = text.strip()
-    if t.startswith(MENU_PREFIXES):
+    if _is_menu_button(t):
         reset_state(peer_id)
         return False
 
@@ -1995,36 +2012,31 @@ def handle_state(peer_id, user_id, text):
         if t == "🔀 Переставить":
             if not workers_all:
                 return send(peer_id, "Нет работников", edit_menu())
-            user_states[peer_id] = {"state": "pick_edit_move_name",
-                                    "data": {"edit_date": date_iso}}
+            user_states[peer_id] = {"state": "pick_edit_move_name", "data": {"edit_date": date_iso}}
             return send(peer_id, "Кого переставить?", pick_workers_menu(workers_all))
 
         if t == "↔️ Поменять местами":
             if not workers_all:
                 return send(peer_id, "Нет работников", edit_menu())
-            user_states[peer_id] = {"state": "pick_edit_swap_a",
-                                    "data": {"edit_date": date_iso}}
+            user_states[peer_id] = {"state": "pick_edit_swap_a", "data": {"edit_date": date_iso}}
             return send(peer_id, "Первый работник:", pick_workers_menu(workers_all))
 
         if t == "➖ Убрать из смены":
             if not workers_all:
                 return send(peer_id, "Нет работников", edit_menu())
-            user_states[peer_id] = {"state": "pick_edit_remove_name",
-                                    "data": {"edit_date": date_iso}}
+            user_states[peer_id] = {"state": "pick_edit_remove_name", "data": {"edit_date": date_iso}}
             return send(peer_id, "Кого убрать?", pick_workers_menu(workers_all))
 
         if t == "➕ Добавить в смену":
             if not workers_all:
                 return send(peer_id, "Нет работников", edit_menu())
-            user_states[peer_id] = {"state": "pick_edit_add_name",
-                                    "data": {"edit_date": date_iso}}
+            user_states[peer_id] = {"state": "pick_edit_add_name", "data": {"edit_date": date_iso}}
             return send(peer_id, "Кого добавить?", pick_workers_menu(workers_all))
 
         if t == "🌙 Сменить 2-го сменщика":
             if not workers_all:
                 return send(peer_id, "Нет работников", edit_menu())
-            user_states[peer_id] = {"state": "pick_edit_second_name",
-                                    "data": {"edit_date": date_iso}}
+            user_states[peer_id] = {"state": "pick_edit_second_name", "data": {"edit_date": date_iso}}
             return send(peer_id, "Кто будет 2-м сменщиком?", pick_workers_menu(workers_all))
 
         if t == "👁 Показать расписание":
